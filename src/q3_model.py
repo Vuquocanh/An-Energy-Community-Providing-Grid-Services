@@ -8,49 +8,6 @@ from typing import Literal
 from .model import FlexibleConsumerModel
 
 
-class ModelQ3(FlexibleConsumerModel):
-    """Question 3: Quadratic disutility with a daily minimum energy requirement constraint.
-
-    Direction: MINIMIZE total cost (procurement cost + disutility penalty)
-    """
-
-    def build(self) -> "ModelQ3":
-        d, m, T = self.data, self.m, self.T
-
-        self._add_common_variables()
-
-        ref_load = getattr(d, "reference_load", getattr(d, "l_ref", None))
-        if ref_load is None:
-            ref_load = [0.0] * len(T)
-
-        c_Q = getattr(d, "quadratic_disutility", getattr(d, "c_Q", getattr(d, "c_q", None)))
-        if c_Q is None:
-            c_Q = 1.0
-
-        E_min = getattr(d, "min_daily_energy_kWh", getattr(d, "E_min", getattr(d, "min_daily_energy", None)))
-        if E_min is None:
-            E_min = 0.0
-
-        self.expr["disutility"] = gp.quicksum(
-            c_Q * (self.var["load"][t] - ref_load[t]) * (self.var["load"][t] - ref_load[t]) for t in T
-        )
-        self.expr["procurement_cost"] = gp.quicksum(
-            self._money_terms(t) for t in T
-        )
-        m.setObjective(
-            self.expr["disutility"] + self.expr["procurement_cost"], GRB.MINIMIZE
-        )
-
-        self._add_common_constraints()
-
-        self.con["min_daily_energy"] = m.addConstr(
-            E_min - gp.quicksum(self.var["load"][t] for t in T) <= 0,
-            name="min_daily_energy"
-        )
-
-        m.update()
-        return self
-    
 class ModelQ3Battery(FlexibleConsumerModel):
     """Question 3.(g): Flexible consumer with 
         quadratic disutility, minimum daily energy, and battery storage.

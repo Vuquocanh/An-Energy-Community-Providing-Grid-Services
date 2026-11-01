@@ -4,7 +4,6 @@ Here, we will use one class for each question, sharing a common skeleton.
 
     FlexibleConsumerModel   -> for Q1, price-elastic consumption, MAXIMIZES daily surplus
     Q2LinearModel           -> for Q2b, linear disutility |l - ref|, MINIMIZES cost + disutility
-    Q2QuadraticModel        -> for Q2c, quadratic disutility, MINIMIZES cost + disutility
 
 Each model has its own optimisation direction, stated in its class docstring: it decides the
 sign of every dual value reported below.
@@ -106,8 +105,6 @@ class FlexibleConsumerModel:
         self.T = range(data.n_hours)
         self.m = gp.Model(name)
         self.m.Params.OutputFlag = 1 if verbose else 0
-        # only relevant if you add a quadratic constraint (none is needed in Assignment 1)
-        self.m.Params.QCPDual = 1
         self.m.Params.DualReductions = 0
         # decision variables by name
         self.var: dict[str, gp.tupledict | gp.Var] = {}
@@ -175,25 +172,6 @@ class FlexibleConsumerModel:
                 + self.price_import[t] * self.var['import'][t]
                 - self.price_export[t] * self.var['export'][t])
 
-    # ------------------------------------------------------------------ 2. build
-
-    def build(self) -> "FlexibleConsumerModel":
-        """Question 1 model: maximize daily surplus subject to (1b)-(1f)."""
-        d, m, T = self.data, self.m, self.T
-        if d.consumption_utility is None:
-            raise ValueError(f"Case {d.question!r} has no consumption utility: "
-                             "use the model class of its own question, not the Question 1 model.")
-        self._add_common_variables()
-        # (1a): surplus = utility of consumption - (PV cost + import cost - export revenue)
-        self.expr["utility"] = gp.quicksum(
-            d.consumption_utility * self.var["load"][t] for t in T)
-        self.expr["procurement_cost"] = gp.quicksum(
-            self._money_terms(t) for t in T)
-        m.setObjective(
-            self.expr["utility"] - self.expr["procurement_cost"], GRB.MAXIMIZE)
-        self._add_common_constraints()
-        m.update()
-        return self
 
     # -------------------------------------------------- objective decomposition
     def objective_terms(self) -> dict[str, float]:
@@ -303,62 +281,6 @@ class Q2LinearModel(FlexibleConsumerModel):
             (ref[t] - self.var["load"][t] - self.var["deviation"][t] <= 0 for t in T), name="dev_dn")
         m.update()
         return self
-
-
-class Q2QuadraticModel(FlexibleConsumerModel):
-    """Question 2.(c): strictly convex quadratic disutility of the deviation.
-
-    Direction: MINIMIZE  sum_t [ c_Q * (load_t - ref_t)^2 + c_PV * pv_t
-                                 + pi_imp_t * import_t - pi_exp_t * export_t ]
-    The quadratic term sits in the objective only (a QP: quadratic objective, linear
-    constraints), so the duals of the linear constraints are reported as usual.
-    """
-
-    def build(self) -> "Q2QuadraticModel":
-        d, m, T = self.data, self.m, self.T
-        if d.reference_load is None or d.quadratic_disutility is None:
-            raise ValueError(f"Case {d.question!r} has no reference profile / quadratic disutility "
-                             "coefficient: use the model class of its own question.")
-        ref, c_Q = d.reference_load, d.quadratic_disutility
-
-        self._add_common_variables()
-        self.expr["disutility"] = gp.quicksum(
-            c_Q * (self.var["load"][t] - ref[t]) * (self.var["load"][t] - ref[t]) for t in T)
-        self.expr["procurement_cost"] = gp.quicksum(
-            self._money_terms(t) for t in T)
-        m.setObjective(
-            self.expr["disutility"] + self.expr["procurement_cost"], GRB.MINIMIZE)
-        self._add_common_constraints()
-        m.update()
-        return self
-
-
-#: Which model class solves which data case (used by main.py). Q3 classes to be added.
-MODEL_BY_CASE: dict[str, type[FlexibleConsumerModel]] = {
-    "Q1_caseA": FlexibleConsumerModel,
-    "Q1_caseB": FlexibleConsumerModel,
-    "Q2_linear": Q2LinearModel,
-    "Q2_quadratic": Q2QuadraticModel,
-}
-
-
-def model_for_case(question: str) -> type[FlexibleConsumerModel]:
-    """Model class registered for a data case, with a clear error for future cases."""
-    if question in MODEL_BY_CASE:
-        return MODEL_BY_CASE[question]
-    
-    if "battery" in question.lower():
-        from .q3_model import ModelQ3Battery
-        return ModelQ3Battery
-
-    if question.startswith("Q3"):
-        from .q3_model import ModelQ3
-        return ModelQ3
-
-    raise NotImplementedError(
-        f"No model implemented yet for case {question!r}. "
-        f"Implemented: {sorted(MODEL_BY_CASE)} or any 'Q3_*' case."
-    )
 
 
 _STATUS = {
