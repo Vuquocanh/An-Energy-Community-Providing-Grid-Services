@@ -7,8 +7,7 @@ covers the three set-ups of Question 1 with two switches (``SETUPS``):
     "R"     "member"      False      no contract: own meter, full tariffs, no cap
     "I"     "member"      True       individual contracts: own meter, (1 - beta) tariffs, own cap kappa_i * cap, penalty
     "C"     "community"   True       community contract: one meter, (1 - beta) tariffs, one cap, penalty
-
-"R" and "I" are implemented so far; "C" follows (step 3).
+    "C0"    "community"   False      benchmark, pooling alone: one meter, full tariffs, no cap
 
 Under a contract, a kWh imported below the cap pays (1 - beta) * tau_imp, a kWh above the cap loses
 the discount and pays the full tau_imp plus the penalty alpha; a kWh exported pays (1 - beta) * tau_exp.
@@ -112,6 +111,7 @@ SETUPS: dict[str, tuple[str, bool]] = {
     "R": ("member", False),
     "I": ("member", True),
     "C": ("community", True),
+    "C0": ("community", False),
 }
 
 
@@ -122,7 +122,7 @@ class CommunityModel:
     ----------
     com : CommunityData
         Members, prices and contract (``load_community``); build variations on a copy of it.
-    setup : "R", "I" or "C"
+    setup : "R", "I", "C" or "C0"
     end_soc_mode : {'constraint', 'objective', 'free'}, default 'constraint'
         End-of-day state of charge of every battery, as in Assignment 1 (Question 3.(g)):
         'constraint' SoC_24 >= SoC_0 (cyclic); 'objective' the energy left at t = 24 is valued at
@@ -141,8 +141,6 @@ class CommunityModel:
     ):
         if setup not in SETUPS:
             raise ValueError(f"Unknown setup {setup!r}: one of {list(SETUPS)}.")
-        if setup == "C":
-            raise NotImplementedError("Setup 'C' is not implemented yet (step 3).")
         if end_soc_mode not in ("constraint", "objective", "free"):
             raise ValueError(
                 f"Invalid end_soc_mode: {end_soc_mode!r}. Must be 'constraint', 'objective', or 'free'.")
@@ -190,6 +188,8 @@ class CommunityModel:
             self._add_member(d)
         if self.level == "member":
             self._add_member_meters()
+        else:
+            self._add_community_meter()
         for name, per_member in self.mexpr.items():
             self.expr[name] = gp.quicksum(per_member.values())
         self.m.setObjective(gp.quicksum(self.expr.values()), GRB.MINIMIZE)
@@ -295,6 +295,33 @@ class CommunityModel:
             else:
                 self._put(self.mexpr, "tariff", i, gp.quicksum(tau_below * imp[t] + tau_exp * exp[t] for t in T))
 
+    def _add_community_meter(self) -> None:
+        """One meter for the community (C, C0): import and export at the connection point, kWh/h.
+
+        balance_t: import - export - sum_i q_i,t == 0, arranged so that its dual lambda_t is the community's
+        marginal price of energy in hour t, the internal price of the dual settlement (DKK/kWh). Energy at
+        p_t and tariffs on the metered exchange; the members exchange freely behind the meter. Under a
+        contract (C): exceedance E_t >= import - cap_t, E >= 0 (``cap``; its dual >= 0 is the value of one
+        more kW of the community's cap), the tariffs of ``_tariffs`` and the penalty alpha * E.
+        """
+        m, T, p = self.m, self.T, self.com.energy_price
+        tau_below, tau_above, tau_exp = self._tariffs()
+        imp = self.var["import"] = m.addVars(T, name="import")
+        exp = self.var["export"] = m.addVars(T, name="export")
+        self.con["balance"] = m.addConstrs(
+            (imp[t] - exp[t] - gp.quicksum(self.net[i][t] for i in self.ids) == 0 for t in T), name="balance")
+        self.expr["energy"] = gp.quicksum(p[t] * (imp[t] - exp[t]) for t in T)
+        if self.contract:
+            # E_t = max(0, import - cap_t) at the optimum: a kWh of E costs beta * tau_imp + alpha >= 0 more
+            cap = self.com.contract.capacity_limit_kW
+            e = self.var["exceedance"] = m.addVars(T, name="exceedance")
+            self.con["cap"] = m.addConstrs((e[t] >= imp[t] - cap[t] for t in T), name="cap")
+            self.expr["tariff"] = gp.quicksum(
+                tau_below * (imp[t] - e[t]) + tau_above * e[t] + tau_exp * exp[t] for t in T)
+            self.expr["penalty"] = self.com.contract.penalty_DKK_per_kWh * e.sum()
+        else:
+            self.expr["tariff"] = gp.quicksum(tau_below * imp[t] + tau_exp * exp[t] for t in T)
+
     # -------------------------------------------------- objective decomposition
     def objective_terms(self) -> dict[str, float]:
         """Optimal value of every cost term summed over the members (DKK)."""
@@ -358,11 +385,13 @@ class CommunityModel:
         if self.level == "member":      # the DSO meters every member: the sum of their imports and exports
             hourly["import"] = members["import"].groupby(level="hour").sum()
             hourly["export"] = members["export"].groupby(level="hour").sum()
-        hourly["exceedance"] = (hourly["import"] - hourly["cap"]).clip(lower=0.0)
-        if "exceedance" in members:     # I: the exceedance of the members' own caps, the one billed by the DSO
+        # what the DSO bills above the cap(s): the members' own caps (I) or the community's cap (C)
+        if "exceedance" in members:
             hourly["exceedance_billed"] = members["exceedance"].groupby(level="hour").sum()
-        for name, v in self.var.items():
-            hourly[name] = [v[t].X for t in T]
+        for name, v in self.var.items():    # level "community": import, export (and exceedance) at the meter
+            hourly["exceedance_billed" if name == "exceedance" else name] = [v[t].X for t in T]
+        # congestion of the feeder in every setup: import at the connection point above the cap
+        hourly["exceedance"] = (hourly["import"] - hourly["cap"]).clip(lower=0.0)
         duals: dict[str, float] = {}
         for name, c in self.con.items():
             if isinstance(c, gp.tupledict):
