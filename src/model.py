@@ -7,7 +7,6 @@ covers the three set-ups of Question 1 with two switches (``SETUPS``):
     "R"     "member"      False      no contract: own meter, full tariffs, no cap
     "I"     "member"      True       individual contracts: own meter, (1 - beta) tariffs, own cap kappa_i * cap, penalty
     "C"     "community"   True       community contract: one meter, (1 - beta) tariffs, one cap, penalty
-    "C0"    "community"   False      benchmark, pooling alone: one meter, full tariffs, no cap
 
 Under a contract, a kWh imported below the cap pays (1 - beta) * tau_imp, a kWh above the cap loses
 the discount and pays the full tau_imp plus the penalty alpha; a kWh exported pays (1 - beta) * tau_exp.
@@ -111,7 +110,6 @@ SETUPS: dict[str, tuple[str, bool]] = {
     "R": ("member", False),
     "I": ("member", True),
     "C": ("community", True),
-    "C0": ("community", False),
 }
 
 
@@ -122,7 +120,7 @@ class CommunityModel:
     ----------
     com : CommunityData
         Members, prices and contract (``load_community``); build variations on a copy of it.
-    setup : "R", "I", "C" or "C0"
+    setup : "R", "I", or "C" 
     end_soc_mode : {'constraint', 'objective', 'free'}, default 'constraint'
         End-of-day state of charge of every battery, as in Assignment 1 (Question 3.(g)):
         'constraint' SoC_24 >= SoC_0 (cyclic); 'objective' the energy left at t = 24 is valued at
@@ -296,7 +294,7 @@ class CommunityModel:
                 self._put(self.mexpr, "tariff", i, gp.quicksum(tau_below * imp[t] + tau_exp * exp[t] for t in T))
 
     def _add_community_meter(self) -> None:
-        """One meter for the community (C, C0): import and export at the connection point, kWh/h.
+        """One meter for the community (C): import and export at the connection point, kWh/h.
 
         balance_t: import - export - sum_i q_i,t == 0, arranged so that its dual lambda_t is the community's
         marginal price of energy in hour t, the internal price of the dual settlement (DKK/kWh). Energy at
@@ -311,16 +309,14 @@ class CommunityModel:
         self.con["balance"] = m.addConstrs(
             (imp[t] - exp[t] - gp.quicksum(self.net[i][t] for i in self.ids) == 0 for t in T), name="balance")
         self.expr["energy"] = gp.quicksum(p[t] * (imp[t] - exp[t]) for t in T)
-        if self.contract:
-            # E_t = max(0, import - cap_t) at the optimum: a kWh of E costs beta * tau_imp + alpha >= 0 more
-            cap = self.com.contract.capacity_limit_kW
-            e = self.var["exceedance"] = m.addVars(T, name="exceedance")
-            self.con["cap"] = m.addConstrs((e[t] >= imp[t] - cap[t] for t in T), name="cap")
-            self.expr["tariff"] = gp.quicksum(
-                tau_below * (imp[t] - e[t]) + tau_above * e[t] + tau_exp * exp[t] for t in T)
-            self.expr["penalty"] = self.com.contract.penalty_DKK_per_kWh * e.sum()
-        else:
-            self.expr["tariff"] = gp.quicksum(tau_below * imp[t] + tau_exp * exp[t] for t in T)
+        # E_t = max(0, import - cap_t) at the optimum: a kWh of E costs beta * tau_imp + alpha >= 0 more
+        cap = self.com.contract.capacity_limit_kW
+        e = self.var["exceedance"] = m.addVars(T, name="exceedance")
+        self.con["cap"] = m.addConstrs((e[t] >= imp[t] - cap[t] for t in T), name="cap")
+        self.expr["tariff"] = gp.quicksum(
+            tau_below * (imp[t] - e[t]) + tau_above * e[t] + tau_exp * exp[t] for t in T)
+        self.expr["penalty"] = self.com.contract.penalty_DKK_per_kWh * e.sum()
+
 
     # -------------------------------------------------- objective decomposition
     def objective_terms(self) -> dict[str, float]:
@@ -344,7 +340,9 @@ class CommunityModel:
     # --------------------------------------------------------------- extraction
     def _extract_results(self, status: str) -> Results:
         T, com = list(self.T), self.com
-
+        # a MIP (e.g. the pricing models of Questions 2-3) has no duals: skip every 'dual_*' column
+        mcon = self.mcon if not self.m.IsMIP else {}
+        con = self.con if not self.m.IsMIP else {}
         # --- one table per member: every hourly family of self.mvar / self.mcon becomes a column
         frames = {}
         for i in self.ids:
@@ -358,7 +356,7 @@ class CommunityModel:
                     shift = len(v) - len(T)     # families indexed 0..24 (soc): value at the end of the hour
                     df[name] = [v[t + shift].X for t in T]
             df["net"] = [self.net[i][t].getValue() for t in T]
-            for name, per_member in self.mcon.items():
+            for name, per_member in mcon.items():
                 if isinstance(per_member.get(i), gp.tupledict):
                     df[f"dual_{name}"] = [_dual(per_member[i][t]) for t in T]
             frames[i] = df
@@ -370,7 +368,7 @@ class CommunityModel:
             index=self.ids).fillna(0.0)
         costs["total"] = costs.sum(axis=1)
         costs.insert(0, "archetype", [com.member(i).archetype for i in self.ids])
-        for name, per_member in self.mcon.items():
+        for name, per_member in mcon.items():
             scalars = {i: _dual(c) for i, c in per_member.items() if isinstance(c, gp.Constr)}
             if scalars:
                 costs[f"dual_{name}"] = pd.Series(scalars)
@@ -393,7 +391,7 @@ class CommunityModel:
         # congestion of the feeder in every setup: import at the connection point above the cap
         hourly["exceedance"] = (hourly["import"] - hourly["cap"]).clip(lower=0.0)
         duals: dict[str, float] = {}
-        for name, c in self.con.items():
+        for name, c in con.items():
             if isinstance(c, gp.tupledict):
                 hourly[f"dual_{name}"] = [_dual(c[t]) for t in T]
             else:

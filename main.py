@@ -5,6 +5,7 @@
     python main.py --day d4                          # another day of the week (and that day's cap)
     python main.py --members                         # also print every member's Assignment 1 summary
     python main.py --demo                            # also run the scenario-generation demonstration (Question 3)
+    python main.py --verify                          # run the Question 1 validation checks (src/validation.py)
 
 No model is provided: build your Assignment 1 model class on the ``InputData`` of each member, then the community
 models of the assignment (R, I, C, DP, ...) on top of it, one function per experiment, writing to ``results/``.
@@ -12,9 +13,11 @@ models of the assignment (R, I, C, DP, ...) on top of it, one function per exper
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from src.data_loader import load_community, list_communities
+from src.validation import run_q1_checks
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
@@ -25,6 +28,7 @@ def main() -> None:
     ap.add_argument("--day", default="d1", help="d1 (base case) ... d7")
     ap.add_argument("--members", action="store_true", help="print the Assignment 1 summary of every member")
     ap.add_argument("--demo", action="store_true", help="run the scenario-generation demonstration")
+    ap.add_argument("--verify", action="store_true", help="run the Question 1 validation checks")
     args = ap.parse_args()
 
     com = load_community(args.community, day=args.day)
@@ -40,7 +44,8 @@ def main() -> None:
     if args.demo:
         import runpy
         runpy.run_module("src.scenario_generation", run_name="__main__")
-
+    if args.verify and not run_q1_checks():
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
