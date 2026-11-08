@@ -1,4 +1,4 @@
-"""Repaired Question 2 pricing model: complete LP KKT with SOS1.
+"""Dynamic Pricing Model for Question 2 (MPEC reformulation to MILP).
 
 Formulates the community manager's internal pricing problem:
 1. Lower level: Each prosumer i responds independently to posted hourly prices x_t (or x_{i,t}).
