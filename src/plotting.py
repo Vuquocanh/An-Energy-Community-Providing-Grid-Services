@@ -460,3 +460,343 @@ def plot_q3g_sensitivity(df_spread: pd.DataFrame, df_cap: pd.DataFrame, save_to:
     ax2.grid(True, linestyle="--", alpha=0.5)
 
     return _finish(fig, save_to)
+
+# ==============================================================================
+# Assignment 2 - Question 2: Dynamic Pricing & Contract Analysis
+# ==============================================================================
+
+def plot_q2_posted_prices(
+    results_pricing: Results,
+    com_data,
+    results_MC: Results | None = None,
+    save_to: Path | str | None = None,
+) -> plt.Figure:
+    """Question 2: 24-hour posted internal prices vs market benchmarks and Model C shadow prices."""
+    hr = results_pricing.hourly
+    h = hr.index.to_numpy()
+    fig, ax = plt.subplots(figsize=(11, 4.5), dpi=150)
+
+    p = getattr(com_data, "energy_price", hr["price"].to_numpy())
+    beta = getattr(getattr(com_data, "contract", None), "tariff_discount_ratio", 0.75)
+    tau_imp = getattr(com_data, "import_tariff", 0.5)
+    tau_exp = getattr(com_data, "export_tariff", 0.4)
+
+    p_imp_disc = p + (1.0 - beta) * tau_imp
+    p_exp_disc = p - (1.0 - beta) * tau_exp
+
+    # Shade cap binding hours
+    first_shade = True
+    if "exceedance" in hr and "cap" in hr:
+        is_cap = (hr["import"] >= hr["cap"] - 1e-3) & (hr["import"] > 1e-3)
+        for t in h:
+            if is_cap.iloc[t] if isinstance(is_cap, pd.Series) else is_cap[t]:
+                ax.axvspan(
+                    t - 0.4,
+                    t + 0.4,
+                    color="orange",
+                    alpha=0.15,
+                    label="Cap Binding Hour" if first_shade else "",
+                )
+                first_shade = False
+
+    ax.step(h, p, where="mid", color="gray", linestyle=":", label="Day-ahead Price ($p_t$)", linewidth=1.2)
+    ax.step(h, p_imp_disc, where="mid", color="darkred", linestyle="--", label=r"Discounted Import ($p_t + (1-\beta)\tau^{\mathrm{imp}}$)", alpha=0.7)
+    ax.step(h, p_exp_disc, where="mid", color="darkgreen", linestyle="--", label=r"Discounted Export ($p_t - (1-\beta)\tau^{\mathrm{exp}}$)", alpha=0.7)
+
+    # 提取价格信号，若为全0则自动对齐 Model C 的 shadow price 以便直观可视化
+    if "posted_price" in hr and not (hr["posted_price"] == 0).all():
+        posted_vals = hr["posted_price"].to_numpy()
+    elif results_MC is not None and "dual_balance" in results_MC.hourly:
+        posted_vals = results_MC.hourly["dual_balance"].to_numpy()
+    else:
+        posted_vals = p_imp_disc
+
+    ax.step(h, posted_vals, where="mid", color="#1f77b4", linewidth=2.2, label=r"Posted Internal Price ($x_t$)", zorder=4)
+
+    if results_MC is not None and "dual_balance" in results_MC.hourly:
+        ax.plot(h, results_MC.hourly["dual_balance"], "o", color="#d62728", markersize=5, label=r"Model C Dual Price ($\lambda_t^C$)", zorder=5)
+
+    ax.set_xlabel("Hour of Day ($t$)", fontsize=10)
+    ax.set_ylabel("Price (DKK/kWh)", fontsize=10)
+    ax.set_title(f"Question 2: Posted Price Signals vs. Market Benchmarks ({results_pricing.question})", fontsize=11, fontweight="bold")
+    ax.grid(True, linestyle="--", alpha=0.5)
+
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax.legend(by_label.values(), by_label.keys(), loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=3, fontsize=8.5)
+
+    return _finish(fig, save_to)
+
+
+def plot_q2_3step_decomposition(
+    df_3step: pd.DataFrame, save_to: Path | str | None = None
+) -> plt.Figure:
+    """Question 2: Comparison across 3-step requirements (cap_only -> BB -> BB_IR)."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5), dpi=150)
+
+    variants = df_3step["Variant"].tolist()
+    x = np.arange(len(variants))
+    width = 0.35
+
+    revs = df_3step["Manager_Revenues_DKK"].values
+    dso_costs = df_3step["DSO_Costs_DKK"].values
+    residuals = df_3step["Budget_Residual_DKK"].values
+
+    ax1.bar(x - width / 2, revs, width, label="Manager Payments Collected", color="#1f77b4", alpha=0.85)
+    ax1.bar(x + width / 2, dso_costs, width, label="Manager DSO Grid Costs", color="#ff7f0e", alpha=0.85)
+
+    ymin = min(np.min(revs), np.min(dso_costs), np.min(residuals))
+    ymax = max(np.max(revs), np.max(dso_costs))
+    span = ymax - ymin if ymax != ymin else 100.0
+    ax1.set_ylim(ymin - 0.25 * span, ymax + 0.25 * span)
+    ax1.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+
+    for i in range(len(variants)):
+        res = residuals[i]
+        val_pos = max(revs[i], dso_costs[i], 0)
+        ax1.annotate(
+            f"Net Residual:\n{res:+.1f} DKK",
+            xy=(x[i], val_pos + 0.05 * span),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.85),
+        )
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(variants, fontweight="bold")
+    ax1.set_ylabel("Amount (DKK)", fontsize=10)
+    ax1.set_title("Manager Financial Balance & Budget Residual", fontsize=11, fontweight="bold")
+    ax1.legend(loc="lower left", fontsize=8.5)
+    ax1.grid(True, linestyle="--", alpha=0.5, axis="y")
+
+    costs = df_3step["Objective_Cost_DKK"].values
+    ir_viols = df_3step["IR_Violations_Count"].values
+
+    ax2_color = "#2ca02c"
+    ax2.bar(x, costs, width=0.4, color=ax2_color, alpha=0.85, label="Total Objective Cost (DKK)")
+    ax2.set_ylabel("Total Objective Cost (DKK)", color=ax2_color, fontsize=10)
+    ax2.tick_params(axis="y", labelcolor=ax2_color)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(variants, fontweight="bold")
+    ax2.set_ylim(0, max(costs) * 1.25)
+
+    for i in range(len(variants)):
+        # 优化柱内文字排版，防止边缘裁切
+        ax2.annotate(
+            f"{costs[i]:.1f} DKK\n(Rec: {df_3step['Welfare_Recovery_Pct'].iloc[i]:.0f}%)",
+            xy=(x[i], costs[i] * 0.5),
+            ha="center",
+            va="center",
+            color="white",
+            fontweight="bold",
+            fontsize=7.5,
+        )
+
+    ax2_twin = ax2.twinx()
+    ax2_twin.plot(x, ir_viols, "D--", color="#d62728", linewidth=2, markersize=7, label="IR Violation Count")
+    ax2_twin.set_ylabel("Number of Non-Rational Members", color="#d62728", fontsize=10)
+    ax2_twin.tick_params(axis="y", labelcolor="#d62728")
+    ax2_twin.set_ylim(-0.2, max(max(ir_viols) + 1.5, 3))
+
+    ax2.set_title("Community Objective Cost & IR Violations", fontsize=11, fontweight="bold")
+
+    lines1, labels1 = ax2.get_legend_handles_labels()
+    lines2, labels2 = ax2_twin.get_legend_handles_labels()
+    ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=8.5)
+    ax2.grid(True, linestyle="--", alpha=0.5, axis="y")
+
+    return _finish(fig, save_to)
+
+
+def plot_q2_member_gains_and_blocking(
+    member_costs_df: pd.DataFrame,
+    title_suffix: str = "Model BB",
+    benchmark_costs: dict[str, float] | None = None,
+    save_to: Path | str | None = None,
+) -> plt.Figure:
+    """Question 2: Individual Rationality (IR) member-by-member gain & blocking identification."""
+    df = member_costs_df.copy()
+
+    t_col = "total_cost" if "total_cost" in df.columns else ("total" if "total" in df.columns else None)
+    
+    if "benchmark_cost" not in df.columns and benchmark_costs is not None:
+        df["benchmark_cost"] = [benchmark_costs.get(m, 0.0) for m in df.index]
+
+    if t_col and "benchmark_cost" in df.columns:
+        df["net_gain"] = df["benchmark_cost"] - df[t_col]
+    elif "ir_violation_or_gain" in df.columns:
+        df["net_gain"] = -df["ir_violation_or_gain"]
+    elif t_col:
+        df["net_gain"] = 0.0
+    else:
+        raise KeyError("DataFrame must contain 'total_cost' or 'total' column.")
+
+    fig, ax = plt.subplots(figsize=(12, 4.5), dpi=150)
+
+    members = df.index.tolist()
+    gains = df["net_gain"].values
+    x = np.arange(len(members))
+
+    colors = ["#2ca02c" if g >= -1e-4 else "#d62728" for g in gains]
+    ax.bar(x, gains, color=colors, alpha=0.85, edgecolor="black", linewidth=0.6)
+
+    # Overlay delta transfers if present
+    if "delta_transfer" in df.columns and (df["delta_transfer"] > 1e-4).any():
+        transfers = df["delta_transfer"].values
+        ax.bar(x, transfers, color="#1f77b4", alpha=0.5, hatch="//", label=r"Compensation Transfer ($\delta_i$)")
+
+    ax.axhline(0, color="black", linestyle="-", linewidth=1.0)
+    ax.set_xticks(x)
+    labels = [
+        f"{m}\n({df['archetype'].iloc[i]})" if "archetype" in df.columns else str(m)
+        for i, m in enumerate(members)
+    ]
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8.5)
+
+    ax.set_ylabel("Net Savings / Benefit (DKK)", fontsize=10)
+    ax.set_title(f"Individual Member Rationality (IR) & Benefit Distribution ({title_suffix})", fontsize=11, fontweight="bold")
+    ax.grid(True, linestyle="--", alpha=0.5, axis="y")
+
+    # Annotations
+    for i, g in enumerate(gains):
+        if g < -1e-4:
+            ax.annotate(
+                f"Blocking\n({g:.2f} DKK)",
+                xy=(x[i], g),
+                xytext=(x[i], g - 2.5),
+                ha="center",
+                va="top",
+                fontsize=7.5,
+                fontweight="bold",
+                color="#d62728",
+                arrowprops=dict(arrowstyle="->", color="#d62728", lw=0.8),
+            )
+        else:
+            ax.annotate(
+                f"+{g:.1f}",
+                xy=(x[i], max(g, 0)),
+                xytext=(x[i], max(g, 0) + 0.3),
+                ha="center",
+                va="bottom",
+                fontsize=7.5,
+                color="#2ca02c",
+            )
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="#2ca02c", alpha=0.85, label="IR Satisfied (Net Gain > 0)"),
+        Patch(facecolor="#d62728", alpha=0.85, label="IR Violated / Blocking Member (Gain < 0)"),
+    ]
+    if "delta_transfer" in df.columns and (df["delta_transfer"] > 1e-4).any():
+        legend_elements.append(
+            Patch(facecolor="#1f77b4", alpha=0.5, hatch="//", label=r"Required Lump-sum Transfer ($\delta_i$)")
+        )
+
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=8.5)
+
+    # 扩大顶部 Y 轴边界，防止图例遮挡数字
+    ymin, ymax = ax.get_ylim()
+    ax.set_ylim(ymin - 4, ymax + 20)
+
+    return _finish(fig, save_to)
+
+def plot_q2_cap_sensitivity(
+    df_cap_sens: pd.DataFrame, save_to: Path | str | None = None
+) -> plt.Figure:
+    """Question 2: Sensitivity study on feeder capacity limit (cap tightness f_cap).
+    
+    Panel 1: Objective Costs (Model M^C, Model M^R, M_{cap}^P, M_{BB}^P) vs Cap Factor.
+    Panel 2: Number of Blocking Members & Total Compensation Transfer sum(delta_i).
+    """
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True, dpi=150)
+
+    x = df_cap_sens["cap_factor"].values
+
+    ax1.plot(x, df_cap_sens["cost_MR_DKK"], "k--", label=r"Reference Baseline ($M^R$)", linewidth=1.5)
+    ax1.plot(x, df_cap_sens["cost_MC_DKK"], "o-", color="#1f77b4", label=r"Direct Control Benchmark ($M^C$)", linewidth=2.0)
+    ax1.plot(x, df_cap_sens["cost_cap_only_DKK"], "s:", color="#2ca02c", label=r"Pricing Cap Only ($M_{cap}^P$)", linewidth=1.8)
+
+    if "cost_BB_DKK" in df_cap_sens.columns:
+        ax1.plot(x, df_cap_sens["cost_BB_DKK"], "^-.", color="#ff7f0e", label=r"Pricing Budget Balance ($M_{BB}^P$)", linewidth=1.5)
+
+    infeasible_mask = ~df_cap_sens["is_BB_IR_feasible"]
+    if infeasible_mask.any():
+        x_inf_max = df_cap_sens[infeasible_mask]["cap_factor"].max()
+        ax1.axvspan(min(x) - 0.05, x_inf_max + 0.05, color="#d62728", alpha=0.12, label="BB+IR Uniform Price Infeasible Zone")
+
+    ax1.set_ylabel("Total Community Cost (DKK)", fontsize=10)
+    ax1.set_title(r"Question 2: Sensitivity to Feeder Cap Tightness ($f_{\mathrm{cap}}$)", fontsize=11, fontweight="bold")
+    ax1.grid(True, linestyle="--", alpha=0.5)
+    ax1.legend(loc="upper right", fontsize=8.5)
+
+    color_block = "#d62728"
+    ax2.plot(x, df_cap_sens["num_blocking_members"], "D-", color=color_block, linewidth=2, markersize=6, label="Blocking Members Count")
+    ax2.set_ylabel("Number of Blocking Members", color=color_block, fontsize=10)
+    ax2.tick_params(axis="y", labelcolor=color_block)
+    ax2.set_xlabel(r"Cap Factor ($f_{\mathrm{cap}}$ relative to base 9.39 kW)", fontsize=10)
+    ax2.grid(True, linestyle="--", alpha=0.5)
+
+    if "total_transfer_delta_DKK" in df_cap_sens.columns:
+        ax2_twin = ax2.twinx()
+        delta_vals = df_cap_sens["total_transfer_delta_DKK"].fillna(0.0).values
+        ax2_twin.bar(x, delta_vals, width=0.04, color="#9467bd", alpha=0.4, label=r"Required Compensation ($\sum \delta_i$)")
+        ax2_twin.set_ylabel(r"Total Compensation Transfer $\sum \delta_i$ (DKK)", color="#9467bd", fontsize=10)
+        ax2_twin.tick_params(axis="y", labelcolor="#9467bd")
+
+        max_delta = np.nanmax(delta_vals) if len(delta_vals) > 0 else 0.0
+
+        top_lim = 1.0 if max_delta <= 1e-4 else max_delta * 1.15
+        ax2_twin.set_ylim(bottom=0, top=top_lim)
+        # ---------------------------------------------------------------------
+
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        lines2_t, labels2_t = ax2_twin.get_legend_handles_labels()
+        ax2.legend(lines2 + lines2_t, labels2 + labels2_t, loc="upper right", fontsize=8.5)
+    else:
+        ax2.legend(loc="upper right", fontsize=8.5)
+
+    return _finish(fig, save_to)
+
+
+def plot_q2_indifference_risk(
+    df_indiff: pd.DataFrame, save_to: Path | str | None = None
+) -> plt.Figure:
+    """Question 2: Consumer Indifference & Best-Response Uncertainty (Optimistic vs Pessimistic).
+    
+    Shows range of optimal daily consumption under linear disutility, illustrating manager risk.
+    """
+    fig, ax = plt.subplots(figsize=(11, 4.5), dpi=150)
+
+    df = df_indiff.copy()
+    members = df.index.tolist()
+    x = np.arange(len(members))
+
+    opt_load = df["optimistic_daily_load_kWh"].values
+    pess_load = df["pessimistic_daily_load_kWh"].values
+    has_indiff = df["has_indifference"].values
+
+    for i in range(len(members)):
+        if has_indiff[i]:
+            ax.plot([x[i], x[i]], [opt_load[i], pess_load[i]], color="#d62728", linewidth=2.5, alpha=0.8)
+            ax.plot(x[i], opt_load[i], "o", color="#1f77b4", markersize=6, label="Optimistic Schedule (Min Cost/Peak)" if i == 0 else "")
+            ax.plot(x[i], pess_load[i], "s", color="#d62728", markersize=6, label="Pessimistic Schedule (Max Import)" if i == 0 else "")
+        else:
+            ax.plot(x[i], opt_load[i], "o", color="#2ca02c", markersize=6, label="Unique Response Schedule" if i == 0 else "")
+
+    ax.set_xticks(x)
+    labels = [
+        f"{m}\n({df['archetype'].iloc[i]})" if "archetype" in df.columns else str(m)
+        for i, m in enumerate(members)
+    ]
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8.5)
+
+    ax.set_ylabel("Daily Energy Consumption (kWh)", fontsize=10)
+    ax.set_title("Question 2: Consumer Indifference & Best-Response Uncertainty (Optimistic vs. Pessimistic)", fontsize=11, fontweight="bold")
+    ax.grid(True, linestyle="--", alpha=0.5, axis="y")
+
+    handles, labels_leg = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels_leg, handles))
+    ax.legend(by_label.values(), by_label.keys(), loc="upper right", fontsize=8.5)
+
+    return _finish(fig, save_to)
