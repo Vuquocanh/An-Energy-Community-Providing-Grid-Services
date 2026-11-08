@@ -1,4 +1,4 @@
-"""Repaired Question 2 pricing model: complete LP KKT with SOS1.
+"""Dynamic Pricing Model for Question 2 (MPEC reformulation to MILP).
 
 Formulates the community manager's internal pricing problem:
 1. Lower level: Each prosumer i responds independently to posted hourly prices x_t (or x_{i,t}).
@@ -39,7 +39,7 @@ class DynamicPricingModel:
         benchmark_costs: dict[str, float] | None = None,
         allow_price_discrimination: bool = False,
         end_soc_mode: Literal["constraint", "objective", "free"] = "constraint",
-        big_m: float | None = None,
+        big_m: float = 500.0,
         verbose: bool = False,
         time_limit: float = 120,
     ):
@@ -53,10 +53,10 @@ class DynamicPricingModel:
         self.benchmark_costs = benchmark_costs or {}
         self.allow_price_discrimination = allow_price_discrimination
         self.end_soc_mode = end_soc_mode
-        self.big_m = big_m
-        if big_m is not None:
-            import warnings
-            warnings.warn("big_m is ignored: complementarity now uses SOS1.", stacklevel=2)
+        self.big_m = float(big_m)
+
+        if not np.isfinite(self.big_m) or self.big_m <= 0:
+            raise ValueError("big_m must be finite and positive")
         if end_soc_mode not in ("constraint", "objective", "free"):
             raise ValueError("Unknown end_soc_mode")
         if time_limit <= 0:
@@ -101,10 +101,16 @@ class DynamicPricingModel:
         return self
 
     def _complementarity(self, multiplier, slack_expression, name):
-        """Nonnegative multiplier and slack; at most one may be nonzero."""
-        slack = self.m.addVar(lb=0, name=f"slack_{name}")
-        self.m.addConstr(slack == slack_expression, name=f"slack_definition_{name}")
-        self.m.addSOS(GRB.SOS_TYPE1, [multiplier, slack])
+        """Enforce complementarity using a binary variable and Big-M."""
+        m = self.m
+        M = self.big_m
+
+        slack = m.addVar(lb=0.0, name=f"slack_{name}")
+        z = m.addVar(vtype=GRB.BINARY, name=f"binary_{name}")
+
+        m.addConstr(slack == slack_expression,name=f"slack_definition_{name}",)
+        m.addConstr(multiplier <= M * z,name=f"bigM_first_{name}",)
+        m.addConstr(slack <= M * (1 - z),name=f"bigM_second_{name}",)
         self.complementarity_pairs.append((multiplier, slack))
 
     def _add_upper_level_variables(self) -> None:
