@@ -6,7 +6,8 @@
     python main.py --members                         # also print every member's Assignment 1 summary
     python main.py --demo                            # also run the scenario-generation demonstration (Question 3)
     python main.py --verify                          # run the Question 1 validation checks (src/validation.py)
-
+    python main.py --q1-base                         # Question 1: R, I and C on the base case (results/q1_base/)
+    
 No model is provided: build your Assignment 1 model class on the ``InputData`` of each member, then the community
 models of the assignment (R, I, C, DP, ...) on top of it, one function per experiment, writing to ``results/``.
 """
@@ -17,6 +18,7 @@ import sys
 from pathlib import Path
 
 from src.data_loader import load_community, list_communities
+from src.q1 import run_q1_base
 from src.validation import run_q1_checks
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -29,6 +31,7 @@ def main() -> None:
     ap.add_argument("--members", action="store_true", help="print the Assignment 1 summary of every member")
     ap.add_argument("--demo", action="store_true", help="run the scenario-generation demonstration")
     ap.add_argument("--verify", action="store_true", help="run the Question 1 validation checks")
+    ap.add_argument("--q1-base", action="store_true", help="Question 1: R, I and C on the base community (day: --day)")
     args = ap.parse_args()
 
     com = load_community(args.community, day=args.day)
@@ -46,6 +49,8 @@ def main() -> None:
         runpy.run_module("src.scenario_generation", run_name="__main__")
     if args.verify and not run_q1_checks():
         sys.exit(1)
+    if args.q1_base:
+        run_q1_base(RESULTS_DIR / "q1_base", day=args.day)
 
 if __name__ == "__main__":
     main()
