@@ -16,7 +16,7 @@ import pandas as pd
 
 from .data_loader import CommunityData, load_community
 from .model import CommunityModel, Results
-from .plotting import plot_import_vs_cap, plot_shift_heatmap
+from .plotting import plot_import_vs_cap, plot_internal_price, plot_member_gains, plot_shift_heatmap
 
 TOL = 1e-6      # kW: an import above the cap by less than this is counted as at the cap
 SETUPS_Q1 = ("R", "I", "C")
@@ -71,6 +71,37 @@ def import_change_by_source(res: Results, ref: Results) -> pd.DataFrame:
     return out
 
 
+def settlement(res: dict[str, Results]) -> tuple[pd.DataFrame, dict[str, float]]:
+    """Dual settlement of the community contract: member i pays sum_t lambda_t q_i,t, lambda_t the dual of the
+    community balance in C (the one Gurobi returns; it is not unique in the hours at the cap).
+
+    Returns (members, budget), in DKK/day. members, one row per member: archetype, payment (< 0: the member is
+    paid), cost_C = its disutility + PV cost + payment, cost_R and cost_I (its total cost in R and I),
+    gain_vs_R = cost_R - cost_C and gain_vs_I = cost_I - cost_C (> 0: better off in C), IR_vs_R, IR_vs_I (gain >= 0).
+    budget: collected = sum of the payments; energy, tariff, penalty and paid_to_DSO; surplus = collected - paid;
+    cap_rent = sum_t dual_cap_t x cap_t, equal to the surplus by complementary slackness.
+    """
+    C = res["C"]
+    pay = C.members["net"].mul(C.hourly["dual_balance"], level="hour").groupby(level="member").sum()
+    t = pd.DataFrame(index=C.member_costs.index)
+    t["archetype"] = C.member_costs["archetype"]
+    t["payment_DKK"] = pay
+    t["cost_C_DKK"] = C.member_costs["total"] + pay
+    t["cost_R_DKK"] = res["R"].member_costs["total"]
+    t["cost_I_DKK"] = res["I"].member_costs["total"]
+    t["gain_vs_R_DKK"] = t["cost_R_DKK"] - t["cost_C_DKK"]
+    t["gain_vs_I_DKK"] = t["cost_I_DKK"] - t["cost_C_DKK"]
+    t["IR_vs_R"] = t["gain_vs_R_DKK"] >= -TOL
+    t["IR_vs_I"] = t["gain_vs_I_DKK"] >= -TOL
+
+    terms = C.meta["objective_terms"]
+    paid = terms["energy"] + terms["tariff"] + terms["penalty"]
+    budget = {"collected_DKK": pay.sum(), "energy_DKK": terms["energy"], "tariff_DKK": terms["tariff"],
+              "penalty_DKK": terms["penalty"], "paid_to_DSO_DKK": paid, "surplus_DKK": pay.sum() - paid,
+              "cap_rent_DKK": (C.hourly["dual_cap"] * C.hourly["cap"]).sum()}
+    return t, budget
+
+
 def run_q1_base(out: Path | str, day: str = "d1") -> dict[str, Results]:
     """R, I and C on the base community on ``day``: print and save the metrics and the cost terms.
 
@@ -95,10 +126,19 @@ def run_q1_base(out: Path | str, day: str = "d1") -> dict[str, Results]:
         change.to_csv(out / f"import_change_{s}_vs_R_{day}.csv", index_label="hour")
     plot_import_vs_cap(res, save_to=out / f"fig_import_vs_cap_{day}.png")
     plot_shift_heatmap(changes, save_to=out / f"fig_shift_{day}.png")
+    members, budget = settlement(res)
+    members.to_csv(out / f"settlement_{day}.csv", index_label="member")
+    pd.Series(budget, name="DKK").to_csv(out / f"budget_{day}.csv", index_label="item")
+    plot_internal_price(res["C"], com, save_to=out / f"fig_internal_price_{day}.png")
+    plot_member_gains(members, save_to=out / f"fig_member_gains_{day}.png")
 
     print(f"\nQuestion 1, base community, {day} - metrics against R:")
     print(table.round(2).to_string())
     print(f"value of pooling (Cost_I - Cost_C): {res['I'].objective - res['C'].objective:.2f} DKK")
     print("\ncost terms (DKK):")
     print(terms.round(2).to_string())
+    print("\nsettlement of C (DKK/day; gain > 0: the member is better off in C):")
+    print(members.round(2).to_string())
+    print("\nbudget of the community manager (DKK/day):")
+    print(pd.Series(budget).round(2).to_string())
     return res

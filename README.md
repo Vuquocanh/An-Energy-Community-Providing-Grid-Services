@@ -387,14 +387,15 @@ A model built on the class that has integer variables gets the same tables, with
 * R and I: the joint model equals the members solved one by one;
 * I with beta = 0 and no cap equals R (limit case);
 * the exceedance variables of I and C equal max(0, import - cap); the balance at the community meter of C holds;
-* C <= I under the same contract; C at the cap in 18 hours of d1 (assignment text).
+* C <= I under the same contract; C at the cap in 18 hours of d1 (assignment text);
+* the manager's surplus in the settlement of C equals the cap rent sum_t dual_cap_t x cap_t (complementary slackness).
 
 ## 7. Experiments
 
 | command | what | outputs |
 |---|---|---|
 | `python main.py --verify` | validation checks (Section 6.4) | PASS / FAIL per check; exit code 1 on a failure |
-| `python main.py --q1-base` (`--day d1`) | Question 1: R, I and C on the base community | `results/q1_base/`: `metrics_<day>.csv`, `cost_terms_<day>.csv`, `import_change_<I, C>_vs_R_<day>.csv`, `fig_import_vs_cap_<day>.png`, `fig_shift_<day>.png`, and per setup `base_<day>_<setup>_hourly.csv`, `_members.csv`, `_member_costs.csv`, `_summary.txt` |
+| `python main.py --q1-base` (`--day d1`) | Question 1: R, I and C on the base community | `results/q1_base/`: `metrics_<day>.csv`, `cost_terms_<day>.csv`, `import_change_<I, C>_vs_R_<day>.csv`, `fig_import_vs_cap_<day>.png`, `fig_shift_<day>.png`, `settlement_<day>.csv`, `budget_<day>.csv`, `fig_internal_price_<day>.png`, `fig_member_gains_<day>.png`, and per setup `base_<day>_<setup>_hourly.csv`, `_members.csv`, `_member_costs.csv`, `_summary.txt` |
 | `python main.py --plot-data` | input data of d1-d7: prices, reference load, PV available, cap | `results/data/data_<day>.png` |
 
 **Question 1 metrics** (`q1.metrics`), all against R (the members alone, no contract):
@@ -406,3 +407,9 @@ A model built on the class that has integer variables gets the same tables, with
 | `hours_above_cap` | h | DSO | number of hours with import_t > cap_t |
 
 The metrics table also gives `cost_DKK`, `exceedance_kWh`, `peak_import_kW` and `energy_shifted_kWh` (= sum |l - ref| / 2).
+
+**Settlement of C** (`q1.settlement`, DKK/day): member i pays sum_t lambda_t q_i,t, with lambda_t the dual of the
+community balance (the one Gurobi returns; it is not unique in the hours at the cap, the total surplus is). Its cost
+in C is its disutility + PV cost + payment; `gain_vs_R` = cost_R - cost_C and `gain_vs_I` = cost_I - cost_C (> 0:
+better off in C; `IR_vs_R`, `IR_vs_I`: gain >= 0). The budget compares what the manager collects with what it pays
+the DSO (energy, tariff, penalty); the surplus equals the cap rent.

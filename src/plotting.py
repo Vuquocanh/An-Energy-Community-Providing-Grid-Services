@@ -1,6 +1,8 @@
 """plot_import_vs_cap(res, save_to): import at the connection point of R / I / C against the cap.
 plot_shift_heatmap(changes, save_to): change of import against R by source and hour, one block per setup.
 plot_day_data(com, save_to): input data of one day - prices, reference load, PV available and cap.
+plot_internal_price(res, com, save_to): internal price lambda of C against the prices at the meter.
+plot_member_gains(table, save_to): gain of every member from joining C, against R and against I.
 """
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Patch
 
 from .data_loader import CommunityData
 from .model import Results
@@ -116,4 +119,46 @@ def plot_day_data(com: CommunityData, save_to: Path | str | None = None) -> plt.
     ax2.set(xlabel="hour", ylabel="power (kW)", xticks=range(0, 24, 2))
     ax2.legend(fontsize=8, loc="upper left")
     _style(ax2)
+    return _finish(fig, save_to)
+
+
+def plot_internal_price(res: Results, com: CommunityData, save_to: Path | str | None = None) -> plt.Figure:
+    """Internal price lambda_t of C (``res``: the dual of the community balance) against the day-ahead price and
+    the prices at the meter, import below the cap p + (1 - beta) tau_imp and export p - (1 - beta) tau_exp
+    (DKK/kWh); the hours with the import at the cap are shaded."""
+    h = res.hourly
+    hours = h.index.to_numpy()
+    f = 1 - com.contract.tariff_discount_ratio
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    for t in hours[(h["import"] >= h["cap"] - 1e-6).to_numpy()]:
+        ax.axvspan(t - 0.5, t + 0.5, color=GRID, alpha=0.6, lw=0)
+    ax.step(hours, h["price"], where="mid", color=INK, lw=1.5, label="day-ahead price p")
+    ax.step(hours, h["price"] + f * com.import_tariff, where="mid", color=MUTED, lw=1.2, ls="--",
+            label="import price below the cap")
+    ax.step(hours, h["price"] - f * com.export_tariff, where="mid", color=MUTED, lw=1.2, ls=":",
+            label="export price")
+    ax.step(hours, h["dual_balance"], where="mid", color=SETUP_COLOR["C"], lw=2, label="internal price λ (C)")
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles + [Patch(color=GRID, alpha=0.6)], labels + ["import at the cap"], fontsize=8, loc="upper left")
+    ax.set(xlabel="hour", ylabel="price (DKK/kWh)", xticks=range(0, 24, 2))
+    _style(ax)
+    return _finish(fig, save_to)
+
+
+def plot_member_gains(table: pd.DataFrame, save_to: Path | str | None = None) -> plt.Figure:
+    """Gain of every member from joining C under the dual settlement, against R and against I (DKK/day; ``table`` =
+    q1.settlement), the members in the order of the table (slope class, then assets); > 0: better off in C."""
+    x = np.arange(len(table))
+    w = 0.4
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    ax.bar(x - w / 2, table["gain_vs_R_DKK"], w, color=SETUP_COLOR["R"], edgecolor=SURFACE, lw=0.8, label="against R")
+    ax.bar(x + w / 2, table["gain_vs_I_DKK"], w, color=SETUP_COLOR["I"], edgecolor=SURFACE, lw=0.8, label="against I")
+    ax.axhline(0, color=BASELINE, lw=1)
+    slope = table["archetype"].str[:2].to_numpy()
+    for k in np.flatnonzero(slope[1:] != slope[:-1]):        # separators between the slope classes
+        ax.axvline(k + 0.5, color=GRID, lw=1)
+    ax.set_xticks(x, table.index, rotation=45, ha="right")
+    ax.set(ylabel="gain from joining C (DKK/day)")
+    ax.legend(fontsize=9, loc="upper left")
+    _style(ax)
     return _finish(fig, save_to)
