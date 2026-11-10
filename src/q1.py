@@ -1,6 +1,6 @@
 """Question 1 experiments: is the community worth forming? R, I and C on one day.
 
-    python main.py --q1-base     # R, I and C on the base community: metrics table + CSVs in results/q1_base/
+    python main.py --q1-base     # R, I and C on the base community: metrics table, CSVs and figures in results/q1_base/
 
 Metrics, every one against the reference R (members alone, no contract):
     value_DKK            community   Cost_R - Cost_X, what the contract is worth to the community (> 0: worth signing)
@@ -16,6 +16,7 @@ import pandas as pd
 
 from .data_loader import CommunityData, load_community
 from .model import CommunityModel, Results
+from .plotting import plot_import_vs_cap, plot_shift_heatmap
 
 TOL = 1e-6      # kW: an import above the cap by less than this is counted as at the cap
 SETUPS_Q1 = ("R", "I", "C")
@@ -46,11 +47,37 @@ def metrics(res: Results, ref: Results) -> dict[str, float]:
     }
 
 
+def import_change_by_source(res: Results, ref: Results) -> pd.DataFrame:
+    """Hourly change of the import at the connection point, ``res`` minus ``ref`` (kWh/h), split by source.
+
+    At every meter import = sum_i q_i + export, with q_i = load + charge - pv - discharge, so
+        d(import) = d(load) of each slope class L1-L4 + d(charge - discharge) - d(pv) + d(export).
+    The last column, 'export / netting', is the change of what crosses the meter outwards: negative when
+    surplus that was exported (R, I) is used behind the meter instead (C). Also returns 'import' = the sum.
+    """
+    def by_hour(r: Results, col: str, ids=None):
+        m = r.members if ids is None else r.members.loc[list(ids)]
+        return m[col].groupby(level="hour").sum() if col in m else 0.0
+
+    out = pd.DataFrame(index=res.hourly.index)
+    slope = res.member_costs["archetype"].str[:2]          # "L1" .. "L4"
+    for k in sorted(slope.unique()):
+        ids = slope.index[slope == k]
+        out[k] = by_hour(res, "load", ids) - by_hour(ref, "load", ids)
+    out["battery"] = (by_hour(res, "p_ch") - by_hour(res, "p_dis")) - (by_hour(ref, "p_ch") - by_hour(ref, "p_dis"))
+    out["pv"] = -(by_hour(res, "pv") - by_hour(ref, "pv"))
+    out["export / netting"] = res.hourly["export"] - ref.hourly["export"]
+    out["import"] = res.hourly["import"] - ref.hourly["import"]
+    return out
+
+
 def run_q1_base(out: Path | str, day: str = "d1") -> dict[str, Results]:
     """R, I and C on the base community on ``day``: print and save the metrics and the cost terms.
 
-    Writes to ``out``: metrics_<day>.csv (one row per set-up), cost_terms_<day>.csv (DKK per term and set-up)
-    and the hourly / members / member_costs tables of every run (``Results.save``). Returns {setup: Results}.
+    Writes to ``out``: metrics_<day>.csv (one row per set-up), cost_terms_<day>.csv (DKK per term and set-up),
+    import_change_<I, C>_vs_R_<day>.csv (``import_change_by_source``), fig_import_vs_cap_<day>.png and
+    fig_shift_<day>.png (``plotting``), and the hourly / members / member_costs tables of every run
+    (``Results.save``). Returns {setup: Results}.
     """
     com = load_community("base", day=day)
     res = solve_setups(com)
@@ -63,6 +90,11 @@ def run_q1_base(out: Path | str, day: str = "d1") -> dict[str, Results]:
     terms.to_csv(out / f"cost_terms_{day}.csv", index_label="setup")
     for r in res.values():
         r.save(out)
+    changes = {s: import_change_by_source(res[s], res["R"]) for s in ("I", "C")}
+    for s, change in changes.items():
+        change.to_csv(out / f"import_change_{s}_vs_R_{day}.csv", index_label="hour")
+    plot_import_vs_cap(res, save_to=out / f"fig_import_vs_cap_{day}.png")
+    plot_shift_heatmap(changes, save_to=out / f"fig_shift_{day}.png")
 
     print(f"\nQuestion 1, base community, {day} - metrics against R:")
     print(table.round(2).to_string())
