@@ -53,16 +53,21 @@ conditions, big-M or SOS1 complementarity, strong-duality linearization of the p
 python main.py                  # loads the base case (16 members, day d1) and prints a summary
 python main.py --members        # ... plus the Assignment 1 summary of every member
 python main.py --demo           # ... plus the scenario-generation demonstration (Question 3)
+python main.py --verify         # ... plus the validation checks of the Question 1 models (Section 6.4): all must PASS
 ```
 
 ## 2. Repository structure
 
 ```
-main.py                        Entry point: load a community -> summarize (extend with one function per experiment)
+main.py                        Entry point: summary of the community, one flag per experiment (Section 7)
 src/
   data_loader.py               load_community("base", day="d1") -> CommunityData:
                                  .members     one Assignment 1 InputData per member (same attribute names as in Assignment 1)
                                  .contract    ContractData: cap, penalty, discount, individual caps and shares of model I
+  model.py                     CommunityModel: the models R, I and C of Question 1 as one class, and Results (Section 6)
+  q1.py                        Question 1 experiments: metrics against R, change of import by source, run_q1_base
+  plotting.py                  Figures: import against the cap, shift heat map, input data of one day
+  validation.py                Validation checks of the Question 1 models (python main.py --verify)
   scenario_generation.py       Question 3: independent preference scenarios per member, merged into joint scenarios (numpy only)
 data/
   appliance_params.json        SHARED catalogue (Assignment 1 format): the loads FL_L1-FL_L4 (linear disutility 0.25-2.0 DKK/kWh), PV_01_S, BAT_01_S
@@ -73,15 +78,11 @@ data/
   preference_uncertainty_params.json   Question 3: uncertainty about the members' preference parameters
   community_base_case.png/.svg, setup_R.png/.svg, setup_I.png/.svg   Figures 1-3 of the assignment (reference, individual contracts, community contract; schematic)
   fig_q3_scenarios.png/.svg    Figure 4 of the assignment (how the scenarios of Question 3 are generated)
-results/                       Written by your code (git-ignored)
+results/                       Written by the code (git-ignored): q1_base/, data/ (Section 7)
 requirements.txt, environment.yaml, .gitignore
 ```
 
-No model code is shipped. Your Assignment 1 code base - the `FlexibleConsumerModel` built on `InputData`,
-your scenario helpers and your plotting - is the natural starting point: every member of the community
-*is* an Assignment 1 consumer, loaded into the same `InputData` class (Section 4). Build the community
-models of the assignment (R, I, C, DP, ...) as one parametrized class with switches rather than as copies,
-and the variations of the base case (Section 4.3) as named configurations.
+The models are documented in Section 6, the commands that reproduce the results in Section 7.
 
 ## 3. How to use the code
 
@@ -309,3 +310,106 @@ As in Assignment 1: keep data loading, model building, solving and plotting sepa
 and save its outputs under `results/`; fix and report the seeds of every scenario set; and commit regularly with
 meaningful messages - the git history is also a record of everyone's contribution. The graders should be able to open
 the code, follow this README, and reproduce every number and figure of the report.
+
+## 6. Models (`src/model.py`)
+
+`CommunityModel` holds every member of the community in one gurobipy model. The three setups of Question 1 differ only in two switches (`SETUPS`):
+
+| setup | `level`: where the DSO meters | `contract` | meaning |
+|---|---|---|---|
+| `"R"` | `"member"` | no | every member alone behind its own meter, full tariffs, no cap |
+| `"I"` | `"member"` | yes | own meter and own contract: cap kappa_i x cap, discounted tariffs, penalty on its own exceedance |
+| `"C"` | `"community"` | yes | one meter and one contract for the community; the members exchange freely behind the meter |
+
+```python
+from src.data_loader import load_community
+from src.model import CommunityModel
+
+res = CommunityModel(load_community("base"), setup="C").build().solve()     # -> Results
+```
+
+The three are linear programs. The objective MINIMIZES the total cost of the community (= minus its welfare, DKK/day): the members' disutility and PV cost, plus the energy at p_t, the tariffs and the penalty at the meter(s). At level `"member"` no constraint couples the members, so R and I decompose into one problem per member.
+
+### 6.1 The member (identical in R, I and C: `CommunityModel._add_member`)
+
+Per member i and hour t, in kWh/h (= kW at the hourly resolution):
+
+| name in the code | variable / constraint | written as | members |
+|---|---|---|---|
+| `load` | l_t free | variable | all |
+| `load_lower`, `load_upper` | l_t >= `load_lower_kWh`_t, l_t <= `load_upper_kWh`_t | constraints | all |
+| `deviation` | dev_t >= 0 | variable | all |
+| `dev_up`, `dev_dn` | dev_t >= l_t - ref_t, dev_t >= ref_t - l_t | constraints | all |
+| `min_daily_energy` | sum_t l_t >= E_min (one per member) | constraint | all |
+| `pv` | pv_t >= 0 | variable | PV owners |
+| `pv_max` | pv_t <= `pv_available`_t | constraint | PV owners |
+| `p_ch`, `p_dis` | 0 <= p_ch_t <= max charge, 0 <= p_dis_t <= max discharge | variables, **bounds (`ub=`)** | battery owners |
+| `soc` | 0 <= s_t <= capacity, t = 0..24 (s_t at the start of hour t) | variable, **bounds (`ub=`)** | battery owners |
+| `soc_init`, `soc_dynamic` | s_0 = initial SoC; s_t+1 = s_t + eta_ch p_ch_t - p_dis_t / eta_dis | constraints | battery owners |
+| `soc_end` | s_24 >= s_0 (`end_soc_mode="constraint"`, the default) | constraint | battery owners |
+
+Cost of the member: c_L sum_t dev_t + c_PV sum_t pv_t. Net consumption q_t = l_t + p_ch_t - pv_t - p_dis_t.
+
+### 6.2 The meters
+
+| setup | variables | constraints | cost |
+|---|---|---|---|
+| R | `import`, `export` >= 0 per member | `balance`: import - export - q_i,t = 0 | p_t (import - export) + tau_imp import + tau_exp export |
+| I | as R, plus `exceedance` e_i,t >= 0 | as R, plus `cap`: e_i,t >= import_i,t - kappa_i cap_t | p_t (import - export) + (1 - beta) tau_imp (import - e) + tau_imp e + (1 - beta) tau_exp export + alpha e |
+| C | `import`, `export`, `exceedance` E_t >= 0 for the community | `balance`: import - export - sum_i q_i,t = 0; `cap`: E_t >= import_t - cap_t | as I, on the community's flows |
+
+**Contract rule** (our reading of the assignment): a kWh imported below the cap pays (1 - beta) tau_imp; a kWh above the cap loses the discount and pays the full tau_imp plus the penalty alpha; a kWh exported pays (1 - beta) tau_exp.
+At the optimum e and E equal the exceedance max(0, import - cap), for any alpha >= 0.
+
+**Duals** (Gurobi `Pi`, MINIMIZE): >= 0 for a `>=` constraint, <= 0 for a `<=` constraint. `balance` is arranged so that its dual is the marginal price of energy: the member's own in R and I; in C it is lambda_t, the internal price of the dual settlement. The dual of `cap` is the value of one more kW of cap in that hour.
+
+**Not enforced**, because with positive prices it only loses money: simultaneous import and export, simultaneous charge and discharge (both zero in R, I and C on d1-d7). A model in which prices can be negative must exclude them.
+
+### 6.3 Results
+
+`solve()` returns a `Results`:
+
+* `objective` (DKK) and `meta["objective_terms"]`: `disutility`, `pv_cost`, `energy`, `tariff`, `penalty` (DKK);
+* `hourly`, per hour at the community level: `price`, `cap`, sums of `reference_load` / `load` / `pv` / `p_ch` /
+  `p_dis`, `import` / `export` at the meter(s) (R, I: the sum of the members' own), `exceedance` = max(0, import -   cap) (the congestion of the feeder), `exceedance_billed` (I: sum of the members' exceedance of their own caps;
+  C: the community's), `dual_balance` (lambda_t in C) and `dual_cap`;
+* `members`, per (member, hour): every variable of the member (`soc` at the end of the hour), `net` (q) and the   hourly duals `dual_<constraint>`;
+* `member_costs`, per member: `archetype`, the member's cost terms and `total`, the duals of its daily constraints (`dual_min_daily_energy` = mu_i). In C the grid costs are the community's (`objective_terms`): `total` covers only the member's disutility and PV cost, before the settlement;
+* `save(folder)` writes the tables as CSV.
+
+A model built on the class that has integer variables gets the same tables, without the duals. Not implemented: an export cap, several scenarios of one member.
+
+### 6.4 Validation
+
+`python main.py --verify` (`src/validation.py`). Run it after any change to `src/model.py`; every check must PASS:
+
+* R against the reference values of `dso_contract_params.json`: the cost on d1-d7 (the daily import may differ slightly from the file: R has alternative optima, with the same cost);
+* R and I: the joint model equals the members solved one by one;
+* I with beta = 0 and no cap equals R (limit case);
+* the exceedance variables of I and C equal max(0, import - cap); the balance at the community meter of C holds;
+* C <= I under the same contract; C at the cap in 18 hours of d1 (assignment text);
+* the manager's surplus in the settlement of C equals the cap rent sum_t dual_cap_t x cap_t (complementary slackness).
+
+## 7. Experiments
+
+| command | what | outputs |
+|---|---|---|
+| `python main.py --verify` | validation checks (Section 6.4) | PASS / FAIL per check; exit code 1 on a failure |
+| `python main.py --q1-base` (`--day d1`) | Question 1: R, I and C on the base community | `results/q1_base/`: `metrics_<day>.csv`, `cost_terms_<day>.csv`, `import_change_<I, C>_vs_R_<day>.csv`, `fig_import_vs_cap_<day>.png`, `fig_shift_<day>.png`, `settlement_<day>.csv`, `budget_<day>.csv`, `fig_internal_price_<day>.png`, `fig_member_gains_<day>.png`, and per setup `base_<day>_<setup>_hourly.csv`, `_members.csv`, `_member_costs.csv`, `_summary.txt` |
+| `python main.py --plot-data` | input data of d1-d7: prices, reference load, PV available, cap | `results/data/data_<day>.png` |
+
+**Question 1 metrics** (`q1.metrics`), all against R (the members alone, no contract):
+
+| metric | unit | point of view | definition |
+|---|---|---|---|
+| `value_DKK` | DKK/day | community | Cost_R - Cost_X; > 0: the contract is worth signing. value_C - value_I = Cost_I - Cost_C is the value of pooling |
+| `max_exceedance_kW` | kW | DSO | max_t (import_t - cap_t)+ at the connection point |
+| `hours_above_cap` | h | DSO | number of hours with import_t > cap_t |
+
+The metrics table also gives `cost_DKK`, `exceedance_kWh`, `peak_import_kW` and `energy_shifted_kWh` (= sum |l - ref| / 2).
+
+**Settlement of C** (`q1.settlement`, DKK/day): member i pays sum_t lambda_t q_i,t, with lambda_t the dual of the
+community balance (the one Gurobi returns; it is not unique in the hours at the cap, the total surplus is). Its cost
+in C is its disutility + PV cost + payment; `gain_vs_R` = cost_R - cost_C and `gain_vs_I` = cost_I - cost_C (> 0:
+better off in C; `IR_vs_R`, `IR_vs_I`: gain >= 0). The budget compares what the manager collects with what it pays
+the DSO (energy, tariff, penalty); the surplus equals the cap rent.
