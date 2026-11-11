@@ -503,13 +503,9 @@ def plot_q2_posted_prices(
     ax.step(h, p_imp_disc, where="mid", color="darkred", linestyle="--", label=r"Discounted Import ($p_t + (1-\beta)\tau^{\mathrm{imp}}$)", alpha=0.7)
     ax.step(h, p_exp_disc, where="mid", color="darkgreen", linestyle="--", label=r"Discounted Export ($p_t - (1-\beta)\tau^{\mathrm{exp}}$)", alpha=0.7)
 
-    # 提取价格信号，若为全0则自动对齐 Model C 的 shadow price 以便直观可视化
-    if "posted_price" in hr and not (hr["posted_price"] == 0).all():
-        posted_vals = hr["posted_price"].to_numpy()
-    elif results_MC is not None and "dual_balance" in results_MC.hourly:
-        posted_vals = results_MC.hourly["dual_balance"].to_numpy()
-    else:
-        posted_vals = p_imp_disc
+    # Posted prices: always the model's own x. Never substitute the C duals here -- doing so once
+    # hid a broken KKT reformulation (all posted prices were zero).
+    posted_vals = hr["posted_price"].to_numpy()
 
     ax.step(h, posted_vals, where="mid", color="#1f77b4", linewidth=2.2, label=r"Posted Internal Price ($x_t$)", zorder=4)
 
@@ -641,10 +637,12 @@ def plot_q2_member_gains_and_blocking(
     colors = ["#2ca02c" if g >= -1e-4 else "#d62728" for g in gains]
     ax.bar(x, gains, color=colors, alpha=0.85, edgecolor="black", linewidth=0.6)
 
-    # Overlay delta transfers if present
-    if "delta_transfer" in df.columns and (df["delta_transfer"] > 1e-4).any():
-        transfers = df["delta_transfer"].values
-        ax.bar(x, transfers, color="#1f77b4", alpha=0.5, hatch="//", label=r"Compensation Transfer ($\delta_i$)")
+    # Overlay the IR compensation of the relaxation (soft-IR slack or extended transfer)
+    comp_col = next((c for c in ("ir_slack", "delta_transfer")
+                     if c in df.columns and (df[c] > 1e-4).any()), None)
+    if comp_col:
+        ax.bar(x, df[comp_col].values, color="#1f77b4", alpha=0.5, hatch="//",
+               label=r"IR compensation ($s_i$)" if comp_col == "ir_slack" else r"Transfer ($\delta_i$)")
 
     ax.axhline(0, color="black", linestyle="-", linewidth=1.0)
     ax.set_xticks(x)
@@ -688,9 +686,11 @@ def plot_q2_member_gains_and_blocking(
         Patch(facecolor="#2ca02c", alpha=0.85, label="IR Satisfied (Net Gain > 0)"),
         Patch(facecolor="#d62728", alpha=0.85, label="IR Violated / Blocking Member (Gain < 0)"),
     ]
-    if "delta_transfer" in df.columns and (df["delta_transfer"] > 1e-4).any():
+    if comp_col:
         legend_elements.append(
-            Patch(facecolor="#1f77b4", alpha=0.5, hatch="//", label=r"Required Lump-sum Transfer ($\delta_i$)")
+            Patch(facecolor="#1f77b4", alpha=0.5, hatch="//",
+                  label=r"Required IR compensation ($s_i$)" if comp_col == "ir_slack"
+                  else r"Required lump-sum transfer ($\delta_i$)")
         )
 
     ax.legend(handles=legend_elements, loc="upper right", fontsize=8.5)
@@ -718,12 +718,25 @@ def plot_q2_cap_sensitivity(
     ax1.plot(x, df_cap_sens["cost_cap_only_DKK"], "s:", color="#2ca02c", label=r"Pricing Cap Only ($M_{cap}^P$)", linewidth=1.8)
 
     if "cost_BB_DKK" in df_cap_sens.columns:
-        ax1.plot(x, df_cap_sens["cost_BB_DKK"], "^-.", color="#ff7f0e", label=r"Pricing Budget Balance ($M_{BB}^P$)", linewidth=1.5)
+        ax1.plot(x, df_cap_sens["cost_BB_DKK"], "^-.", color="#ff7f0e",
+                 label=r"Pricing Budget Balance ($M_{BB}^P$)", linewidth=1.5)
+        # Points whose MILP hit its time limit are upper bounds: mark them hollow.
+        if "bb_status" in df_cap_sens.columns:
+            limited = df_cap_sens["bb_status"].astype(str) != "OPTIMAL"
+            if limited.any():
+                ax1.plot(x[limited.values], df_cap_sens["cost_BB_DKK"].values[limited.values], "^",
+                         markersize=9, markerfacecolor="white", markeredgecolor="#ff7f0e",
+                         linestyle="none", label="BB time-limited (upper bound)")
 
-    infeasible_mask = ~df_cap_sens["is_BB_IR_feasible"]
+    if "cost_soft_ir_DKK" in df_cap_sens.columns:
+        ax1.plot(x, df_cap_sens["cost_soft_ir_DKK"], "d:", color="#9467bd",
+                 label=r"Soft IR, minimum compensation ($M_{\mathrm{soft}}^P$)", linewidth=1.6)
+
+    infeasible_mask = ~df_cap_sens["is_BB_IR_feasible"].astype(bool)
     if infeasible_mask.any():
         x_inf_max = df_cap_sens[infeasible_mask]["cap_factor"].max()
-        ax1.axvspan(min(x) - 0.05, x_inf_max + 0.05, color="#d62728", alpha=0.12, label="BB+IR Uniform Price Infeasible Zone")
+        ax1.axvspan(min(x) - 0.05, x_inf_max + 0.05, color="#d62728", alpha=0.12,
+                    label="BB+IR not attained under uniform prices (proved infeasible or not found)")
 
     ax1.set_ylabel("Total Community Cost (DKK)", fontsize=10)
     ax1.set_title(r"Question 2: Sensitivity to Feeder Cap Tightness ($f_{\mathrm{cap}}$)", fontsize=11, fontweight="bold")
@@ -734,14 +747,15 @@ def plot_q2_cap_sensitivity(
     ax2.plot(x, df_cap_sens["num_blocking_members"], "D-", color=color_block, linewidth=2, markersize=6, label="Blocking Members Count")
     ax2.set_ylabel("Number of Blocking Members", color=color_block, fontsize=10)
     ax2.tick_params(axis="y", labelcolor=color_block)
-    ax2.set_xlabel(r"Cap Factor ($f_{\mathrm{cap}}$ relative to base 9.39 kW)", fontsize=10)
+    ax2.set_xlabel(r"Cap factor $f_{\mathrm{cap}}$ ($1.0$ = shipped cap, 9.39 kW on d1)", fontsize=10)
     ax2.grid(True, linestyle="--", alpha=0.5)
 
-    if "total_transfer_delta_DKK" in df_cap_sens.columns:
+    if "total_ir_slack_DKK" in df_cap_sens.columns:
         ax2_twin = ax2.twinx()
-        delta_vals = df_cap_sens["total_transfer_delta_DKK"].fillna(0.0).values
-        ax2_twin.bar(x, delta_vals, width=0.04, color="#9467bd", alpha=0.4, label=r"Required Compensation ($\sum \delta_i$)")
-        ax2_twin.set_ylabel(r"Total Compensation Transfer $\sum \delta_i$ (DKK)", color="#9467bd", fontsize=10)
+        delta_vals = df_cap_sens["total_ir_slack_DKK"].fillna(0.0).values
+        ax2_twin.bar(x, delta_vals, width=0.04, color="#9467bd", alpha=0.4,
+                     label=r"Required IR compensation ($\sum_i s_i$)")
+        ax2_twin.set_ylabel(r"IR compensation $\sum_i s_i$ (DKK)", color="#9467bd", fontsize=10)
         ax2_twin.tick_params(axis="y", labelcolor="#9467bd")
 
         max_delta = np.nanmax(delta_vals) if len(delta_vals) > 0 else 0.0
@@ -762,9 +776,12 @@ def plot_q2_cap_sensitivity(
 def plot_q2_indifference_risk(
     df_indiff: pd.DataFrame, save_to: Path | str | None = None
 ) -> plt.Figure:
-    """Question 2: Consumer Indifference & Best-Response Uncertainty (Optimistic vs Pessimistic).
-    
-    Shows range of optimal daily consumption under linear disutility, illustrating manager risk.
+    """Question 2: how wide is the members' best response at the posted prices?
+
+    With linear disutility a member's optimal response is a set, not a point.  The bars show the
+    widest hourly span of that set (kWh/h) and the line the number of hours in which the member
+    can move while staying exactly indifferent.  The manager is optimistic if it anticipates one
+    element of the set; nothing in the price guarantees that the member picks it.
     """
     fig, ax = plt.subplots(figsize=(11, 4.5), dpi=150)
 
@@ -772,31 +789,32 @@ def plot_q2_indifference_risk(
     members = df.index.tolist()
     x = np.arange(len(members))
 
-    opt_load = df["optimistic_daily_load_kWh"].values
-    pess_load = df["pessimistic_daily_load_kWh"].values
-    has_indiff = df["has_indifference"].values
+    ranges = df["max_hourly_range_kWh"].astype(float).values
+    hours = df["num_indifferent_hours"].astype(int).values
 
-    for i in range(len(members)):
-        if has_indiff[i]:
-            ax.plot([x[i], x[i]], [opt_load[i], pess_load[i]], color="#d62728", linewidth=2.5, alpha=0.8)
-            ax.plot(x[i], opt_load[i], "o", color="#1f77b4", markersize=6, label="Optimistic Schedule (Min Cost/Peak)" if i == 0 else "")
-            ax.plot(x[i], pess_load[i], "s", color="#d62728", markersize=6, label="Pessimistic Schedule (Max Import)" if i == 0 else "")
-        else:
-            ax.plot(x[i], opt_load[i], "o", color="#2ca02c", markersize=6, label="Unique Response Schedule" if i == 0 else "")
-
+    colors = ["#d62728" if h > 0 else "#2ca02c" for h in hours]
+    ax.bar(x, ranges, color=colors, alpha=0.85, edgecolor="black", linewidth=0.6,
+           label="Widest hourly range of a best response (kWh/h)")
+    ax.set_ylabel("Range of net import (kWh/h)", fontsize=10)
     ax.set_xticks(x)
     labels = [
         f"{m}\n({df['archetype'].iloc[i]})" if "archetype" in df.columns else str(m)
         for i, m in enumerate(members)
     ]
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8.5)
-
-    ax.set_ylabel("Daily Energy Consumption (kWh)", fontsize=10)
-    ax.set_title("Question 2: Consumer Indifference & Best-Response Uncertainty (Optimistic vs. Pessimistic)", fontsize=11, fontweight="bold")
+    ax.set_title("Question 2: Consumer Indifference - the Best Response is a Set, not a Point",
+                 fontsize=11, fontweight="bold")
     ax.grid(True, linestyle="--", alpha=0.5, axis="y")
 
-    handles, labels_leg = ax.get_legend_handles_labels()
-    by_label = dict(zip(labels_leg, handles))
-    ax.legend(by_label.values(), by_label.keys(), loc="upper right", fontsize=8.5)
+    ax2 = ax.twinx()
+    ax2.plot(x, hours, "o--", color="#1f77b4", linewidth=1.6, markersize=6,
+             label="Hours with several optimal loads")
+    ax2.set_ylabel("Indifferent hours (of 24)", color="#1f77b4", fontsize=10)
+    ax2.tick_params(axis="y", labelcolor="#1f77b4")
+    ax2.set_ylim(-0.2, 24.2)
+
+    lines1, labels1 = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=8.5)
 
     return _finish(fig, save_to)
