@@ -24,10 +24,10 @@ INK, MUTED, GRID, BASELINE, SURFACE = "#0b0b0b", "#898781", "#e1e0d9", "#c3c2b7"
 SETUP_COLOR = {"R": MUTED, "I": "#eb6834", "C": "#1baf7a"}
 SOURCE_COLOR = {"L1": "#86b6ef", "L2": "#3987e5", "L3": "#1c5cab", "L4": "#0d366b",
                 "pv": "#eda100", "battery": "#6250d6", "export / netting": BASELINE}
-SOURCE_LABEL = {"L1": "load L1 (c_L 0.25)", "L2": "load L2 (0.5)", "L3": "load L3 (1.0)", "L4": "load L4 (2.0)",
-                "pv": "PV", "battery": "battery (charge - discharge)", "export / netting": "export / netting"}
+SOURCE_LABEL = {"L1": "Load L1 (c_L 0.25)", "L2": "Load L2 (0.5)", "L3": "Load L3 (1.0)", "L4": "Load L4 (2.0)",
+                "pv": "PV", "battery": "Battery (charge - discharge)", "export / netting": "export / netting"}
 HEAT_ROWS = ("L1", "L2", "L3", "L4", "battery", "pv")
-SWEEP_LABEL = {"beta": "tariff discount β", "cap_factor": "cap energy factor f (cap = f E_R / 24)"}
+SWEEP_LABEL = {"beta": "Tariff discount β", "cap_factor": "Cap energy factor f (cap = f*E_R / 24)"}
 DIVERGING = LinearSegmentedColormap.from_list("blue_grey_red", ["#2a78d6", "#f0efec", "#e34948"])
 
 
@@ -105,20 +105,20 @@ def plot_day_data(com: CommunityData, save_to: Path | str | None = None) -> plt.
     p, tau, beta = com.energy_price, com.import_tariff, com.contract.tariff_discount_ratio
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
 
-    ax1.step(h, p, where="mid", color=INK, lw=2, label="day-ahead price p")
-    ax1.step(h, p + tau, where="mid", color=SETUP_COLOR["R"], lw=2, label="import price, no contract")
+    ax1.step(h, p, where="mid", color=INK, lw=2, label="Day-ahead price p")
+    ax1.step(h, p + tau, where="mid", color=SETUP_COLOR["R"], lw=2, label="Import price, no contract")
     ax1.step(h, p + (1 - beta) * tau, where="mid", color=SETUP_COLOR["C"], lw=2,
-             label="import price below the cap, contract")
-    ax1.set(ylabel="price (DKK/kWh)")
+             label="Import price below the cap, contract")
+    ax1.set(ylabel="Price (DKK/kWh)")
     ax1.legend(fontsize=8, loc="upper left")
     _style(ax1)
 
     ax2.step(h, sum(m.reference_load for m in com.members), where="mid", color=SOURCE_COLOR["L2"], lw=2,
-             label="reference load, all members")
+             label="Reference load, all members")
     ax2.step(h, sum(m.pv_available for m in com.members), where="mid", color=SOURCE_COLOR["pv"], lw=2,
              label="PV available, all systems")
-    ax2.step(h, com.contract.capacity_limit_kW, where="mid", color=INK, lw=1.2, ls="--", label="cap")
-    ax2.set(xlabel="hour", ylabel="power (kW)", xticks=range(0, 24, 2))
+    ax2.step(h, com.contract.capacity_limit_kW, where="mid", color=INK, lw=1.2, ls="--", label="Cap")
+    ax2.set(xlabel="Hour", ylabel="Power (kW)", xticks=range(0, 24, 2))
     ax2.legend(fontsize=8, loc="upper left")
     _style(ax2)
     return _finish(fig, save_to)
@@ -142,7 +142,7 @@ def plot_internal_price(res: Results, com: CommunityData, save_to: Path | str | 
     ax.step(hours, h["dual_balance"], where="mid", color=SETUP_COLOR["C"], lw=2, label="internal price λ (C)")
     handles, labels = ax.get_legend_handles_labels()
     ax.legend(handles + [Patch(color=GRID, alpha=0.6)], labels + ["import at the cap"], fontsize=8, loc="upper left")
-    ax.set(xlabel="hour", ylabel="price (DKK/kWh)", xticks=range(0, 24, 2))
+    ax.set(xlabel="Hour", ylabel="Price (DKK/kWh)", xticks=range(0, 24, 2))
     _style(ax)
     return _finish(fig, save_to)
 
@@ -160,7 +160,7 @@ def plot_member_gains(table: pd.DataFrame, save_to: Path | str | None = None) ->
     for k in np.flatnonzero(slope[1:] != slope[:-1]):        # separators between the slope classes
         ax.axvline(k + 0.5, color=GRID, lw=1)
     ax.set_xticks(x, table.index, rotation=45, ha="right")
-    ax.set(ylabel="gain from joining C (DKK/day)")
+    ax.set(ylabel="Gain from joining C (DKK/day)")
     ax.legend(fontsize=9, loc="upper left")
     _style(ax)
     return _finish(fig, save_to)
@@ -172,9 +172,9 @@ def plot_sensitivity(sweeps: dict[str, pd.DataFrame], base: dict[str, float],
     """The Q1 metrics ``rows`` against each swept contract term, one column per term (``sweeps`` = {term:
     q1.sweep(...)}): value of I and C against R (DKK/day, community), max exceedance (kW) and hours above the cap
     of R, I and C (DSO); the base value of the term (``base``) dashed."""
-    spec = {"value_DKK": ("value against R (DKK/day)", ("I", "C")),
-            "max_exceedance_kW": ("max exceedance (kW)", ("R", "I", "C")),
-            "hours_above_cap": ("hours above the cap", ("R", "I", "C"))}
+    spec = {"value_DKK": ("Value against R (DKK/day)", ("I", "C")),
+            "max_exceedance_kW": ("Max exceedance (kW)", ("R", "I", "C")),
+            "hours_above_cap": ("Hours above the cap", ("R", "I", "C"))}
     fig, axes = plt.subplots(len(rows), len(sweeps), figsize=(max(8, 5.5 * len(sweeps)), 2.8 * len(rows)),
                              sharex="col", squeeze=False)
     for j, (term, t) in enumerate(sweeps.items()):
