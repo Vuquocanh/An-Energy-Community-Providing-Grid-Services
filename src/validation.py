@@ -61,288 +61,150 @@ def run_q1_checks() -> bool:
     check("C at the cap in 18 hours of d1 (assignment)", at_cap == 18, f"{at_cap} hours")
     return ok
 
-"""Validation utilities for Question 2.
 
-Provides analytical and numerical validation tools:
-1. Validates dynamic pricing dual equivalence against Question 1 Model C shadow prices.
-2. Checks lower-level KKT complementarity slackness residuals.
-3. Analyzes consumer response indifference (non-uniqueness of optimal schedules)
-   and quantifies the manager's risk under optimistic vs pessimistic assumptions.
+# ----------------------------------------------------------------------------------------------
+# Question 2 validation
+# ----------------------------------------------------------------------------------------------
+"""Three checks that a Q2 pricing solution must pass:
+
+1. the C dispatch is recovered (objective; the dispatch itself may be non-unique);
+2. the posted prices are really a best response for every member and the dual-derived payments
+   equal the actual payments (``DynamicPricingModel.validate_solution``, stored in ``meta``);
+3. the manager's optimistic / pessimistic exposure when the members' best response is not unique
+   (indifference), which is the ``short discussion about indifference`` of Question 2.
 """
 
 from typing import Any
+
 import gurobipy as gp
-from gurobipy import GRB
-import numpy as np
 import pandas as pd
+from gurobipy import GRB
 
-from .data_loader import CommunityData, InputData
-from .model import CommunityModel, Results
-from .model_q2_pricing import DynamicPricingModel
+from .data_loader import CommunityData
+from .model import Results
 
-def validate_against_MC_duals(
-    results_pricing_cap: Results, results_MC: Results, tol: float = 1e-4
-) -> dict[str, Any]:
-    """Validate whether posted prices in M^P_cap match Model C internal balance duals.
 
-    Parameters
-    ----------
-    results_pricing_cap : Results
-        Results object from DynamicPricingModel in 'cap_only' mode.
-    results_MC : Results
-        Results object from Question 1 centralized model (Model C).
-    tol : float, default 1e-4
-        Tolerance threshold for price equivalence check.
+def validate_c_dispatch_recovery(results_pricing: Results, results_MC: Results,
+                                 tol: float = 1e-2) -> dict[str, Any]:
+    """Compare a pricing run with model C.
 
-    Returns
-    -------
-    dict[str, Any]
-        Dictionary with validation status ('passed'), max price difference, and hourly comparison.
+    The *objective* must match (the price can always support the C optimum in the optimistic
+    sense).  The hourly import profile and the distance to the C duals are reported as
+    information only: the C optimum -- and the price vector that supports it -- need not be
+    unique, so requiring ``x == lambda`` would be wrong.
     """
-    x_posted = results_pricing_cap.hourly["posted_price"].to_numpy()
-    
-    if "dual_balance" not in results_MC.hourly.columns:
-        raise KeyError("Model C results table is missing 'dual_balance' column.")
-    
-    lambda_MC = results_MC.hourly["dual_balance"].to_numpy()
-    
-    diff = np.abs(x_posted - lambda_MC)
-    max_diff = float(np.max(diff))
-    passed = bool(max_diff <= tol)
+    gap_obj = float(results_pricing.objective - results_MC.objective)
+    gap_imp = float(np.max(np.abs(results_pricing.hourly["import"].to_numpy()
+                                  - results_MC.hourly["import"].to_numpy())))
+    info = {}
+    if "dual_balance" in results_MC.hourly.columns:
+        diff = np.abs(results_pricing.hourly["posted_price"].to_numpy()
+                      - results_MC.hourly["dual_balance"].to_numpy())
+        info["max_price_minus_lambda"] = float(diff.max())
+        info["median_price_minus_lambda"] = float(np.median(diff))
+    passed = abs(gap_obj) <= tol
+    print(f"[{'PASS' if passed else 'FAIL'}] C dispatch recovered: objective gap = {gap_obj:+.6f} DKK"
+          f" | import profile gap = {gap_imp:.4f} kWh"
+          + (f" | max |x - lambda_C| = {info['max_price_minus_lambda']:.4f} DKK/kWh (informative)"
+             if info else ""))
 
-    df_cmp = pd.DataFrame(
-        {
-            "posted_price_x": x_posted,
-            "MC_dual_lambda": lambda_MC,
-            "absolute_diff": diff,
-        },
-        index=results_pricing_cap.hourly.index,
-    )
-
-    print(f"[{'PASS' if passed else 'FAIL'}] Dual Equivalence (M^P_cap vs M^C): max diff = {max_diff:.6f} DKK/kWh")
-
-    return {
-        "passed": passed,
-        "max_difference": max_diff,
-        "hourly_comparison": df_cmp,
-    }
+    return {"passed": passed, "objective_gap_DKK": gap_obj,
+            "import_profile_gap_kWh": gap_imp, **info}
 
 
-def check_kkt_residuals(
-    model_pricing: DynamicPricingModel, tol: float = 1e-4
-) -> dict[str, Any]:
-    """Verify lower-level KKT complementary slackness conditions (residual < tol).
+def summarize_model_validation(results_pricing: Results, tol: float = 1e-4) -> dict[str, Any]:
+    """Report the independent checks that ``DynamicPricingModel.validate_solution`` stored."""
+    checks = results_pricing.meta.get("validation")
+    if not checks:
+        raise KeyError("No 'validation' entry in meta: was the model solved by DynamicPricingModel?")
+    worst = max(checks.values())
+    passed = worst <= tol
+    print(f"[{'PASS' if passed else 'FAIL'}] KKT / best response / payment identity: "
+          f"worst residual = {worst:.2e}")
+    return {"passed": passed, "max_residual": float(worst), "checks": checks}
 
-    Evaluates (dual_variable) * (primal_slack) for all linearized lower-level constraints.
 
-    Parameters
-    ----------
-    model_pricing : DynamicPricingModel
-        Built and solved DynamicPricingModel object.
-    tol : float, default 1e-4
-        Maximum allowed complementarity residual.
+def analyze_indifference_risk(com_data: CommunityData, posted_prices: np.ndarray,
+                              end_soc_mode: str = "constraint",
+                              tol: float = 1e-5) -> pd.DataFrame:
+    """How wide is every member's best response at the posted prices?
 
-    Returns
-    -------
-    dict[str, Any]
-        Dictionary containing overall pass status, maximum residual, and detailed violation log.
+    With linear disutility a member's best response is a *set*, not a point.  For each member we
+    solve its LP, then -- keeping its cost within ``tol`` of the optimum -- minimise and maximise
+    its net import **in every hour**.  ``max_hourly_range_kWh`` is the widest hourly span of that
+    set and ``num_indifferent_hours`` the number of hours in which the member can move while
+    remaining exactly indifferent.  The manager is optimistic if it anticipates one element of the
+    set; the pessimistic alternative is any other element.
     """
-    mvars = model_pricing.mvar
-    residuals = []
+    from .model import CommunityModel
 
-    for i in model_pricing.ids:
-        d = model_pricing.com.member(i)
-        T = model_pricing.T
-        ref = d.reference_load
-
-        load_val = np.array([mvars["load"][i][t].X for t in T])
-        dev_val = np.array([mvars["dev"][i][t].X for t in T])
-
-        # 1. Dev Upper: alpha_up * (dev - load + ref) == 0
-        alpha_up = np.array([mvars["dual_dev_up"][i][t].X for t in T])
-        slack_dev_up = dev_val - load_val + ref
-        residuals.extend(alpha_up * slack_dev_up)
-
-        # 2. Dev Lower: alpha_dn * (dev + load - ref) == 0
-        alpha_dn = np.array([mvars["dual_dev_dn"][i][t].X for t in T])
-        slack_dev_dn = dev_val + load_val - ref
-        residuals.extend(alpha_dn * slack_dev_dn)
-
-        # 3. Load Bounds: nu_lower * (load - load_lower), nu_upper * (load_upper - load)
-        nu_low = np.array([mvars["dual_load_lower"][i][t].X for t in T])
-        slack_low = load_val - d.load_lower_kWh
-        residuals.extend(nu_low * slack_low)
-
-        nu_upp = np.array([mvars["dual_load_upper"][i][t].X for t in T])
-        slack_upp = d.load_upper_kWh - load_val
-        residuals.extend(nu_upp * slack_upp)
-
-        # 4. Minimum Daily Energy: mu_energy * (sum(load) - min_daily_energy)
-        mu_e = mvars["dual_min_daily_energy"][i].X
-        slack_e = load_val.sum() - d.min_daily_energy_kWh
-        residuals.append(mu_e * slack_e)
-
-        # 5. PV Max Constraint
-        if d.has_pv:
-            pv_val = np.array([mvars["pv"][i][t].X for t in T])
-            phi_pv = np.array([mvars["dual_pv_max"][i][t].X for t in T])
-            slack_pv = d.pv_available - pv_val
-            residuals.extend(phi_pv * slack_pv)
-
-    max_res = float(np.max(np.abs(residuals))) if residuals else 0.0
-    passed = bool(max_res <= tol)
-
-    print(f"[{'PASS' if passed else 'FAIL'}] KKT Residual Check: max residual = {max_res:.2e}")
-
-    return {
-        "passed": passed,
-        "max_residual": max_res,
-    }
-
-
-def analyze_indifference_risk(
-    com_data: CommunityData, posted_prices: np.ndarray, tol: float = 1e-5
-) -> pd.DataFrame:
-    """Analyze consumer response non-uniqueness (indifference) under posted prices.
-
-    Solves each member's problem in two modes:
-    - Optimistic: Minimizes manager cost / grid congestion among optimal member responses.
-    - Pessimistic: Maximizes member grid import / congestion within optimal member cost.
-
-    Parameters
-    ----------
-    com_data : CommunityData
-        Community input data.
-    posted_prices : np.ndarray
-        24-hour posted internal prices x_t.
-    tol : float, default 1e-5
-        Tolerance for optimal cost equivalence.
-
-    Returns
-    -------
-    pd.DataFrame
-        Summary per member of minimum cost, load range variation, and maximum peak deviation.
-    """
     records = []
 
     for d in com_data.members:
         i = d.consumer_id
-        T = range(d.n_hours)
-        ref = d.reference_load
-        c_L = d.linear_disutility
+        follower = CommunityModel(com_data, "C", end_soc_mode=end_soc_mode)
+        follower._add_member(d)
+        T = list(follower.T)
+        net = follower.net[i]
 
-        # Step 1: Solve member's base response LP
-        m_base = gp.Model(f"indiff_base_{i}")
-        m_base.Params.OutputFlag = 0
+        cost = gp.quicksum(v[i] for v in follower.mexpr.values()) \
+            + gp.quicksum(float(posted_prices[t]) * net[t] for t in T)
+        follower.m.setObjective(cost, GRB.MINIMIZE)
+        follower.m.Params.OutputFlag = 0
+        follower.m.optimize()
+        if follower.m.Status != GRB.OPTIMAL:
+            raise RuntimeError(f"Member LP failed for {i}")
+        min_cost = follower.m.ObjVal
+        follower.m.addConstr(cost <= min_cost + tol, name="opt_cost_bound")
 
-        load = m_base.addVars(T, lb=d.load_lower_kWh, ub=d.load_upper_kWh, name="load")
-        dev = m_base.addVars(T, lb=0.0, name="dev")
-        
-        m_base.addConstrs((dev[t] >= load[t] - ref[t] for t in T), name="d_up")
-        m_base.addConstrs((dev[t] >= ref[t] - load[t] for t in T), name="d_dn")
-        m_base.addConstr(load.sum() >= d.min_daily_energy_kWh, name="e_min")
-
-        net = {t: gp.LinExpr(load[t]) for t in T}
-        if d.has_pv:
-            pv = m_base.addVars(T, lb=0.0, ub=d.pv_available, name="pv")
-            for t in T:
-                net[t].add(pv[t], -1.0)
-        if d.has_battery:
-            p_ch = m_base.addVars(T, lb=0.0, ub=d.battery_max_charge_kW, name="p_ch")
-            p_dis = m_base.addVars(T, lb=0.0, ub=d.battery_max_discharge_kW, name="p_dis")
-            soc = m_base.addVars(range(len(T) + 1), lb=0.0, ub=d.battery_capacity_kWh, name="soc")
-            m_base.addConstr(soc[0] == d.battery_initial_soc_kWh)
-            m_base.addConstrs(
-                (soc[t + 1] == soc[t] + d.battery_charging_efficiency * p_ch[t] - p_dis[t] / d.battery_discharging_efficiency for t in T)
-            )
-            m_base.addConstr(soc[len(T)] >= d.battery_initial_soc_kWh)
-            for t in T:
-                net[t].add(p_ch[t] - p_dis[t], 1.0)
-
-        cost_expr = gp.quicksum(posted_prices[t] * net[t] for t in T) + c_L * dev.sum()
-        if d.has_pv:
-            cost_expr.add(d.pv_marginal_cost * pv.sum())
-
-        m_base.setObjective(cost_expr, GRB.MINIMIZE)
-        m_base.optimize()
-
-        min_cost = m_base.ObjVal
-
-        # Step 2: Solve Pessimistic LP (Maximize peak net import given optimal cost)
-        m_pess = m_base.copy()
-        m_pess.Params.OutputFlag = 0
-        
-        # Re-constrain objective to be within min_cost + tol
-        vars_pess = {v.VarName: v for v in m_pess.getVars()}
-        cost_pess = gp.quicksum(
-            posted_prices[t] * (vars_pess[f"load[{t}]"] + (vars_pess[f"p_ch[{t}]"] - vars_pess[f"p_dis[{t}]"] if d.has_battery else 0) - (vars_pess[f"pv[{t}]"] if d.has_pv else 0))
-            for t in T
-        ) + c_L * gp.quicksum(vars_pess[f"dev[{t}]"] for t in T)
-        
-        m_pess.addConstr(cost_pess <= min_cost + tol, name="opt_cost_bound")
-        
-        # Pessimistic objective: Maximize total net import
-        net_import_pess = gp.quicksum(
-            vars_pess[f"load[{t}]"] - (vars_pess[f"pv[{t}]"] if d.has_pv else 0)
-            for t in T
-        )
-        m_pess.setObjective(net_import_pess, GRB.MAXIMIZE)
-        m_pess.optimize()
-
-        opt_load_sum = sum(v.X for v in m_base.getVars() if v.VarName.startswith("load"))
-        pess_load_sum = sum(v.X for k, v in vars_pess.items() if k.startswith("load"))
+        lo, hi = [], []
+        for t in T:
+            follower.m.setObjective(net[t], GRB.MINIMIZE)
+            follower.m.optimize()
+            lo.append(net[t].getValue())
+            follower.m.setObjective(net[t], GRB.MAXIMIZE)
+            follower.m.optimize()
+            hi.append(net[t].getValue())
+        lo, hi = np.array(lo), np.array(hi)
+        spread = hi - lo
 
         records.append(
             {
                 "member": i,
                 "archetype": d.archetype,
-                "disutility_slope": c_L,
+                "disutility_slope": d.linear_disutility,
                 "min_cost_DKK": round(min_cost, 4),
-                "optimistic_daily_load_kWh": round(opt_load_sum, 2),
-                "pessimistic_daily_load_kWh": round(pess_load_sum, 2),
-                "has_indifference": abs(pess_load_sum - opt_load_sum) > 1e-3,
+                "max_hourly_range_kWh": round(float(np.abs(spread).max()), 4),
+                "num_indifferent_hours": int((np.abs(spread) > 1e-3).sum()),
+                "has_indifference": bool(np.abs(spread).max() > 1e-3),
             }
         )
+        follower.m.dispose()
 
-    return pd.DataFrame(records).set_index("member")
+    df = pd.DataFrame(records).set_index("member")
+    n = int(df["has_indifference"].sum())
+    worst = df["max_hourly_range_kWh"].max()
+    print(f"[INFO] Indifference: {n}/{len(df)} members have multiple optimal responses; "
+          f"the largest hourly range of a best response is {worst:.2f} kWh/h. "
+          f"The manager is optimistic if it anticipates one element of that set.")
+    return df
 
 
-def run_q2_validation_pipeline(
-    com_data: CommunityData, results_cap: Results, results_MC: Results, model_pricing: DynamicPricingModel
-) -> dict[str, Any]:
-    """Run full validation suite for Question 2 and return summarized report.
-
-    Parameters
-    ----------
-    com_data : CommunityData
-        Community data object.
-    results_cap : Results
-        Results from M^P_cap pricing model.
-    results_MC : Results
-        Results from Question 1 Model C.
-    model_pricing : DynamicPricingModel
-        Built and solved pricing model object.
-
-    Returns
-    -------
-    dict[str, Any]
-        Aggregated dictionary containing results of all three validation steps.
-    """
+def run_q2_validation_pipeline(com_data: CommunityData, results_cap: Results,
+                               results_MC: Results, model_pricing: Any) -> dict[str, Any]:
+    """Full Q2 validation: C recovery, independent KKT checks, indifference analysis."""
     print("\n" + "=" * 60)
-    print(" Running Question 2 Validation Pipeline")
+    print(" Running Question 2 validation pipeline")
     print("=" * 60)
 
-    res_duals = validate_against_MC_duals(results_cap, results_MC)
-    res_kkt = check_kkt_residuals(model_pricing)
+    res_duals = validate_c_dispatch_recovery(results_cap, results_MC)
+    res_kkt = summarize_model_validation(results_cap)
 
     posted_x = results_cap.hourly["posted_price"].to_numpy()
     df_indiff = analyze_indifference_risk(com_data, posted_x)
 
-    indiff_count = sum(df_indiff["has_indifference"])
-    print(f"[INFO] Consumer Indifference Check: {indiff_count} / {len(com_data.members)} members have multiple optimal schedules.")
-
     return {
-        "dual_equivalence": res_duals,
+        "c_recovery": res_duals,
         "kkt_residuals": res_kkt,
         "indifference_analysis": df_indiff,
     }
