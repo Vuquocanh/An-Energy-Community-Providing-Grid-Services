@@ -65,8 +65,8 @@ src/
                                  .members     one Assignment 1 InputData per member (same attribute names as in Assignment 1)
                                  .contract    ContractData: cap, penalty, discount, individual caps and shares of model I
   model.py                     CommunityModel: the models R, I and C of Question 1 as one class, and Results (Section 6)
-  q1.py                        Question 1 experiments: metrics against R, change of import by source, run_q1_base
-  plotting.py                  Figures: import against the cap, shift heat map, input data of one day
+  q1.py                        Question 1 experiments: metrics against R, energy shifted, dual settlement of C, contract variations and sweeps (run_q1_base, run_q1_sensitivity)
+  plotting.py                  Figures: import against the cap, shift heat map, internal price, members' gains, sensitivity, input data of one day
   validation.py                Validation checks of the Question 1 models (python main.py --verify)
   scenario_generation.py       Question 3: independent preference scenarios per member, merged into joint scenarios (numpy only)
 data/
@@ -395,8 +395,9 @@ A model built on the class that has integer variables gets the same tables, with
 | command | what | outputs |
 |---|---|---|
 | `python main.py --verify` | validation checks (Section 6.4) | PASS / FAIL per check; exit code 1 on a failure |
-| `python main.py --q1-base` (`--day d1`) | Question 1: R, I and C on the base community | `results/q1_base/`: `metrics_<day>.csv`, `cost_terms_<day>.csv`, `import_change_<I, C>_vs_R_<day>.csv`, `fig_import_vs_cap_<day>.png`, `fig_shift_<day>.png`, `settlement_<day>.csv`, `budget_<day>.csv`, `fig_internal_price_<day>.png`, `fig_member_gains_<day>.png`, and per setup `base_<day>_<setup>_hourly.csv`, `_members.csv`, `_member_costs.csv`, `_summary.txt` |
-| `python main.py --plot-data` | input data of d1-d7: prices, reference load, PV available, cap | `results/data/data_<day>.png` |
+| `python main.py --q1-base` (`--day d1`) | Question 1: R, I and C on the base community | `results/q1_base/`: `metrics_<day>.csv`, `cost_terms_<day>.csv`, `import_change_<I, C>_vs_R_<day>.csv`, `fig_import_vs_cap_<day>.png`, `fig_shift_<day>.png`, `shift_by_class_<day>.csv`, `settlement_<day>.csv`, `budget_<day>.csv`, `fig_internal_price_<day>.png`, `fig_member_gains_<day>.png`, and per setup `base_<day>_<setup>_hourly.csv`, `_members.csv`, `_member_costs.csv`, `_summary.txt` |
+| `python main.py --plot-data` | input data of d1-d7: prices, reference load, PV available, cap (for inspection) | `results/data/data_<day>.png` |
+| `python main.py --q1-sensitivity` | Question 1: sweeps of the discount beta and of the cap factor f (cap = f E_R / 24), one at a time, the other at its base value (d1; values in `q1.SWEEPS`) | `results/q1_sensitivity/`: `sweep_beta.csv`, `sweep_cap_factor.csv` (the metrics of R, I and C for every value), `fig_sensitivity.png` (the cap: value and max exceedance), `fig_sensitivity_full.png` (both terms, all three metrics) |
 
 **Question 1 metrics** (`q1.metrics`), all against R (the members alone, no contract):
 
