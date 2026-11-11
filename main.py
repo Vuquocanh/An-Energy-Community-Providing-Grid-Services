@@ -8,6 +8,7 @@
     python main.py --verify                          # run the Question 1 validation checks (src/validation.py)
     python main.py --q1-base                         # Question 1: R, I and C on the base case (results/q1_base/)
     python main.py --plot-data                       # input data of d1-d7: prices, reference load, PV, cap (results/data/)
+    python main.py --q1-sensitivity                  # Question 1: sweeps of the discount and of the cap (results/q1_sensitivity/)
 
 No model is provided: build your Assignment 1 model class on the ``InputData`` of each member, then the community
 models of the assignment (R, I, C, DP, ...) on top of it, one function per experiment, writing to ``results/``.
@@ -20,7 +21,7 @@ from pathlib import Path
 
 from src.data_loader import DAYS, load_community, list_communities
 from src.plotting import plot_day_data
-from src.q1 import run_q1_base
+from src.q1 import run_q1_base, run_q1_sensitivity
 from src.validation import run_q1_checks
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -35,6 +36,7 @@ def main() -> None:
     ap.add_argument("--verify", action="store_true", help="run the Question 1 validation checks")
     ap.add_argument("--q1-base", action="store_true", help="Question 1: R, I and C on the base community (day: --day)")
     ap.add_argument("--plot-data", action="store_true", help="plot the input data of every day d1-d7 (base community)")
+    ap.add_argument("--q1-sensitivity", action="store_true", help="Question 1: sweeps of the discount beta and of the cap (d1)")
     args = ap.parse_args()
 
     com = load_community(args.community, day=args.day)
@@ -57,6 +59,8 @@ def main() -> None:
     if args.plot_data:
         for day in DAYS:
             plot_day_data(load_community("base", day=day), save_to=RESULTS_DIR / "data" / f"data_{day}.png")
+    if args.q1_sensitivity:
+        run_q1_sensitivity(RESULTS_DIR / "q1_sensitivity")
 
 if __name__ == "__main__":
     main()

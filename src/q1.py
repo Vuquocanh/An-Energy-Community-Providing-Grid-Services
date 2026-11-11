@@ -1,6 +1,7 @@
 """Question 1 experiments: is the community worth forming? R, I and C on one day.
 
-    python main.py --q1-base     # R, I and C on the base community: metrics table, CSVs and figures in results/q1_base/
+    python main.py --q1-base            # R, I and C on the base community: metrics table, CSVs and figures in results/q1_base/
+    python main.py --q1-sensitivity     # sweeps of the discount beta and of the cap: CSVs and figure in results/q1_sensitivity/
 
 Metrics, every one against the reference R (members alone, no contract):
     value_DKK            community   Cost_R - Cost_X, what the contract is worth to the community (> 0: worth signing)
@@ -10,16 +11,45 @@ The value of pooling is value_C - value_I = Cost_I - Cost_C (same contract, with
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
 
 from .data_loader import CommunityData, load_community
 from .model import CommunityModel, Results
-from .plotting import plot_import_vs_cap, plot_internal_price, plot_member_gains, plot_shift_heatmap
+from .plotting import (plot_import_vs_cap, plot_internal_price, plot_member_gains, plot_sensitivity,
+                       plot_shift_heatmap)
 
 TOL = 1e-6      # kW: an import above the cap by less than this is counted as at the cap
 SETUPS_Q1 = ("R", "I", "C")
+# values of every contract term swept, one term at a time (base: beta 0.75, cap factor 1.3)
+SWEEPS = {
+    "beta": [0.0, 0.1, 0.2, 0.3, 0.4, 0.45, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0],
+    "cap_factor": [0.8, 0.9, 1.0, 1.1, 1.15, 1.3, 1.6, 1.8, 1.9, 2.0, 2.5, 3.0, 3.5, 4.0],
+}
+
+
+def with_discount(com: CommunityData, beta: float) -> CommunityData:
+    """Copy of ``com`` with the tariff discount ``beta`` of the contract (models I and C)."""
+    return replace(com, contract=replace(com.contract, tariff_discount_ratio=beta))
+
+
+def with_cap_factor(com: CommunityData, f: float) -> CommunityData:
+    """Copy of ``com`` with the cap at f x E_R / 24 (the cap rule of the contract file; f = 1.3 in the base case).
+
+    The community's cap and every individual cap of I (kappa_i x cap) are scaled by the same factor, so that I
+    and C keep facing the same contract.
+    """
+    c = com.contract
+    k = f / c.capacity_limit_daily_energy_factor
+    return replace(com, contract=replace(
+        c, capacity_limit_kW=c.capacity_limit_kW * k, capacity_limit_daily_energy_kWh=c.capacity_limit_daily_energy_kWh * k,
+        capacity_limit_daily_energy_factor=f,
+        individual_capacity_limit_kW={i: v * k for i, v in c.individual_capacity_limit_kW.items()}))
+
+
+VARIANTS = {"beta": with_discount, "cap_factor": with_cap_factor}
 
 
 def solve_setups(com: CommunityData, setups: tuple[str, ...] = SETUPS_Q1) -> dict[str, Results]:
@@ -71,6 +101,18 @@ def import_change_by_source(res: Results, ref: Results) -> pd.DataFrame:
     return out
 
 
+def shift_by_class(res: dict[str, Results]) -> pd.DataFrame:
+    """Energy shifted by every load class, sum |l - ref| / 2 over its members (kWh/day), and the battery
+    discharge (kWh/day), for every setup in ``res``: one row per class L1-L4 and 'battery discharge', one column
+    per setup."""
+    out = {}
+    for s, r in res.items():
+        slope = r.member_costs["archetype"].str[:2]          # "L1" .. "L4"
+        shifted = (r.members["deviation"].groupby(level="member").sum() / 2).groupby(slope).sum()
+        out[s] = {**shifted.to_dict(), "battery discharge": r.members["p_dis"].sum()}
+    return pd.DataFrame(out)
+
+
 def settlement(res: dict[str, Results]) -> tuple[pd.DataFrame, dict[str, float]]:
     """Dual settlement of the community contract: member i pays sum_t lambda_t q_i,t, lambda_t the dual of the
     community balance in C (the one Gurobi returns; it is not unique in the hours at the cap).
@@ -106,9 +148,10 @@ def run_q1_base(out: Path | str, day: str = "d1") -> dict[str, Results]:
     """R, I and C on the base community on ``day``: print and save the metrics and the cost terms.
 
     Writes to ``out``: metrics_<day>.csv (one row per set-up), cost_terms_<day>.csv (DKK per term and set-up),
-    import_change_<I, C>_vs_R_<day>.csv (``import_change_by_source``), fig_import_vs_cap_<day>.png and
-    fig_shift_<day>.png (``plotting``), and the hourly / members / member_costs tables of every run
-    (``Results.save``). Returns {setup: Results}.
+    import_change_<I, C>_vs_R_<day>.csv (``import_change_by_source``), shift_by_class_<day>.csv
+    (``shift_by_class``), settlement_<day>.csv and budget_<day>.csv (``settlement``), the figures
+    fig_import_vs_cap, fig_shift, fig_internal_price and fig_member_gains (``plotting``), and the hourly /
+    members / member_costs tables of every run (``Results.save``). Returns {setup: Results}.
     """
     com = load_community("base", day=day)
     res = solve_setups(com)
@@ -126,6 +169,8 @@ def run_q1_base(out: Path | str, day: str = "d1") -> dict[str, Results]:
         change.to_csv(out / f"import_change_{s}_vs_R_{day}.csv", index_label="hour")
     plot_import_vs_cap(res, save_to=out / f"fig_import_vs_cap_{day}.png")
     plot_shift_heatmap(changes, save_to=out / f"fig_shift_{day}.png")
+    shifts = shift_by_class(res)
+    shifts.to_csv(out / f"shift_by_class_{day}.csv", index_label="source")
     members, budget = settlement(res)
     members.to_csv(out / f"settlement_{day}.csv", index_label="member")
     pd.Series(budget, name="DKK").to_csv(out / f"budget_{day}.csv", index_label="item")
@@ -137,8 +182,42 @@ def run_q1_base(out: Path | str, day: str = "d1") -> dict[str, Results]:
     print(f"value of pooling (Cost_I - Cost_C): {res['I'].objective - res['C'].objective:.2f} DKK")
     print("\ncost terms (DKK):")
     print(terms.round(2).to_string())
+    print("\nenergy shifted by load class and battery discharge (kWh/day):")
+    print(shifts.round(2).to_string())
     print("\nsettlement of C (DKK/day; gain > 0: the member is better off in C):")
     print(members.round(2).to_string())
     print("\nbudget of the community manager (DKK/day):")
     print(pd.Series(budget).round(2).to_string())
     return res
+
+
+def sweep(com: CommunityData, term: str, values: list[float]) -> pd.DataFrame:
+    """Metrics of R, I and C (``metrics``, against R on the same data) for every value of one contract term,
+    ``term`` = "beta" (``with_discount``) or "cap_factor" (``with_cap_factor``): one row per (value, setup)."""
+    rows = []
+    for v in values:
+        res = solve_setups(VARIANTS[term](com, v))
+        rows += [{term: v, "setup": s, **metrics(r, res["R"])} for s, r in res.items()]
+    return pd.DataFrame(rows)
+
+
+def run_q1_sensitivity(out: Path | str) -> dict[str, pd.DataFrame]:
+    """Sweeps of the discount beta and of the cap factor f on the base community (d1), one term at a time with
+    the other at its base value (``SWEEPS``). Writes sweep_<term>.csv, fig_sensitivity.png (the cap: value and
+    max exceedance) and fig_sensitivity_full.png (both terms, all three metrics) to ``out``; returns
+    {term: sweep table}."""
+    com = load_community("base")
+    c = com.contract
+    base = {"beta": c.tariff_discount_ratio, "cap_factor": c.capacity_limit_daily_energy_factor}
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    sweeps = {term: sweep(com, term, values) for term, values in SWEEPS.items()}
+    for term, t in sweeps.items():
+        t.to_csv(out / f"sweep_{term}.csv", index=False)
+        print(f"\nQuestion 1, sweep of {term} (base {base[term]}), metrics against R:")
+        print(t.pivot(index=term, columns="setup",
+                      values=["value_DKK", "max_exceedance_kW", "hours_above_cap"]).round(2).to_string())
+    plot_sensitivity({"cap_factor": sweeps["cap_factor"]}, base, rows=("value_DKK", "max_exceedance_kW"),
+                     save_to=out / "fig_sensitivity.png")
+    plot_sensitivity(sweeps, base, save_to=out / "fig_sensitivity_full.png")
+    return sweeps

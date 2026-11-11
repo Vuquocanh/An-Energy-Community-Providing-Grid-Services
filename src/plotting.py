@@ -3,6 +3,7 @@ plot_shift_heatmap(changes, save_to): change of import against R by source and h
 plot_day_data(com, save_to): input data of one day - prices, reference load, PV available and cap.
 plot_internal_price(res, com, save_to): internal price lambda of C against the prices at the meter.
 plot_member_gains(table, save_to): gain of every member from joining C, against R and against I.
+plot_sensitivity(sweeps, base, save_to): the Q1 metrics against each swept contract term, one column per term.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ SOURCE_COLOR = {"L1": "#86b6ef", "L2": "#3987e5", "L3": "#1c5cab", "L4": "#0d366
 SOURCE_LABEL = {"L1": "load L1 (c_L 0.25)", "L2": "load L2 (0.5)", "L3": "load L3 (1.0)", "L4": "load L4 (2.0)",
                 "pv": "PV", "battery": "battery (charge - discharge)", "export / netting": "export / netting"}
 HEAT_ROWS = ("L1", "L2", "L3", "L4", "battery", "pv")
+SWEEP_LABEL = {"beta": "tariff discount β", "cap_factor": "cap energy factor f (cap = f E_R / 24)"}
 DIVERGING = LinearSegmentedColormap.from_list("blue_grey_red", ["#2a78d6", "#f0efec", "#e34948"])
 
 
@@ -161,4 +163,33 @@ def plot_member_gains(table: pd.DataFrame, save_to: Path | str | None = None) ->
     ax.set(ylabel="gain from joining C (DKK/day)")
     ax.legend(fontsize=9, loc="upper left")
     _style(ax)
+    return _finish(fig, save_to)
+
+
+def plot_sensitivity(sweeps: dict[str, pd.DataFrame], base: dict[str, float],
+                     rows: tuple[str, ...] = ("value_DKK", "max_exceedance_kW", "hours_above_cap"),
+                     save_to: Path | str | None = None) -> plt.Figure:
+    """The Q1 metrics ``rows`` against each swept contract term, one column per term (``sweeps`` = {term:
+    q1.sweep(...)}): value of I and C against R (DKK/day, community), max exceedance (kW) and hours above the cap
+    of R, I and C (DSO); the base value of the term (``base``) dashed."""
+    spec = {"value_DKK": ("value against R (DKK/day)", ("I", "C")),
+            "max_exceedance_kW": ("max exceedance (kW)", ("R", "I", "C")),
+            "hours_above_cap": ("hours above the cap", ("R", "I", "C"))}
+    fig, axes = plt.subplots(len(rows), len(sweeps), figsize=(max(8, 5.5 * len(sweeps)), 2.8 * len(rows)),
+                             sharex="col", squeeze=False)
+    for j, (term, t) in enumerate(sweeps.items()):
+        for i, col in enumerate(rows):
+            ylabel, setups = spec[col]
+            ax = axes[i, j]
+            for s in setups:
+                d = t[t["setup"] == s]
+                ax.plot(d[term], d[col], "o-", color=SETUP_COLOR[s], lw=2, ms=6, label=s)
+            ax.axvline(base[term], color=INK, lw=1, ls="--", label="base case")
+            if col == "value_DKK":
+                ax.axhline(0, color=BASELINE, lw=1)
+            if j == 0:
+                ax.set_ylabel(ylabel)
+            _style(ax)
+        axes[-1, j].set_xlabel(SWEEP_LABEL[term])
+    axes[min(1, len(rows) - 1), 0].legend(fontsize=8, loc="best")     # a panel with R, I and C
     return _finish(fig, save_to)
