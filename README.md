@@ -65,8 +65,8 @@ src/
                                  .members     one Assignment 1 InputData per member (same attribute names as in Assignment 1)
                                  .contract    ContractData: cap, penalty, discount, individual caps and shares of model I
   model.py                     CommunityModel: the models R, I and C of Question 1 as one class, and Results (Section 6)
-  q1.py                        Question 1 experiments: metrics against R, change of import by source, run_q1_base
-  plotting.py                  Figures: import against the cap, shift heat map, input data of one day
+  q1.py                        Question 1 experiments: metrics against R, energy shifted, dual settlement of C, contract variations and sweeps (run_q1_base, run_q1_sensitivity)
+  plotting.py                  Figures: import against the cap, shift heat map, internal price, members' gains, sensitivity, input data of one day
   validation.py                Validation checks of the Question 1 models (python main.py --verify)
   scenario_generation.py       Question 3: independent preference scenarios per member, merged into joint scenarios (numpy only)
 data/
