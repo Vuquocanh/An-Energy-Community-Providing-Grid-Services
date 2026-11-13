@@ -54,6 +54,7 @@ python main.py                  # loads the base case (16 members, day d1) and p
 python main.py --members        # ... plus the Assignment 1 summary of every member
 python main.py --demo           # ... plus the scenario-generation demonstration (Question 3)
 python main.py --verify         # ... plus the validation checks of the Question 1 models (Section 6.4): all must PASS
+python main.py --q2 --day d1    # ... plus the Question 2 pricing decomposition and figures (Section 7.1; MILPs, use --q2-time-limit)
 ```
 
 ## 2. Repository structure
@@ -66,8 +67,10 @@ src/
                                  .contract    ContractData: cap, penalty, discount, individual caps and shares of model I
   model.py                     CommunityModel: the models R, I and C of Question 1 as one class, and Results (Section 6)
   q1.py                        Question 1 experiments: metrics against R, energy shifted, dual settlement of C, contract variations and sweeps (run_q1_base, run_q1_sensitivity)
-  plotting.py                  Figures: import against the cap, shift heat map, internal price, members' gains, sensitivity, input data of one day
-  validation.py                Validation checks of the Question 1 models (python main.py --verify)
+  model_q2_pricing.py          Question 2: DynamicPricingModel, the bilevel pricing problem as one MILP (KKT + Big-M + strong duality), modes cap_only / BB / BB_IR / soft_ir / extended, and its own a-posteriori validate_solution
+  metrics.py                   Question 2 metrics: welfare recovered, efficiency cost of each requirement, budget balance, blocking members, summary table
+  plotting.py                  Figures: Question 1 (import against the cap, shift heat map, internal price, members' gains, sensitivity, input data of one day), Question 2 (posted prices, 3-step decomposition, member gains and blocking, cap sensitivity, indifference) and Question 3
+  validation.py                Validation checks of Question 1 (python main.py --verify) and of Question 2 (run_q2_validation_pipeline, called by python main.py --q2)
   scenario_generation.py       Question 3: independent preference scenarios per member, merged into joint scenarios (numpy only)
 data/
   appliance_params.json        SHARED catalogue (Assignment 1 format): the loads FL_L1-FL_L4 (linear disutility 0.25-2.0 DKK/kWh), PV_01_S, BAT_01_S
@@ -78,8 +81,9 @@ data/
   preference_uncertainty_params.json   Question 3: uncertainty about the members' preference parameters
   community_base_case.png/.svg, setup_R.png/.svg, setup_I.png/.svg   Figures 1-3 of the assignment (reference, individual contracts, community contract; schematic)
   fig_q3_scenarios.png/.svg    Figure 4 of the assignment (how the scenarios of Question 3 are generated)
-results/                       Written by the code (git-ignored): q1_base/, data/ (Section 7)
+results/                       Written by the code (git-ignored): q1_base/, q1_sensitivity/, data/, base/q2/ (Section 7)
 requirements.txt, environment.yaml, .gitignore
+diagnose_q2_ir.py, verify_q2_repaired.py   Standalone Question 2 diagnostics (when BB+IR is infeasible or the MILP does not finish)
 ```
 
 The models are documented in Section 6, the commands that reproduce the results in Section 7.
@@ -398,6 +402,8 @@ A model built on the class that has integer variables gets the same tables, with
 | `python main.py --q1-base` (`--day d1`) | Question 1: R, I and C on the base community | `results/q1_base/`: `metrics_<day>.csv`, `cost_terms_<day>.csv`, `import_change_<I, C>_vs_R_<day>.csv`, `fig_import_vs_cap_<day>.png`, `fig_shift_<day>.png`, `shift_by_class_<day>.csv`, `settlement_<day>.csv`, `budget_<day>.csv`, `fig_internal_price_<day>.png`, `fig_member_gains_<day>.png`, and per setup `base_<day>_<setup>_hourly.csv`, `_members.csv`, `_member_costs.csv`, `_summary.txt` |
 | `python main.py --plot-data` | input data of d1-d7: prices, reference load, PV available, cap (for inspection) | `results/data/data_<day>.png` |
 | `python main.py --q1-sensitivity` | Question 1: sweeps of the discount beta and of the cap factor f (cap = f E_R / 24), one at a time, the other at its base value (d1; values in `q1.SWEEPS`) | `results/q1_sensitivity/`: `sweep_beta.csv`, `sweep_cap_factor.csv` (the metrics of R, I and C for every value), `fig_sensitivity.png` (the cap: value and max exceedance), `fig_sensitivity_full.png` (both terms, all three metrics) |
+| `python main.py --q2` (`--day d1`) | Question 2: the mandatory decomposition cap_only -> BB -> BB+IR (-> soft IR, extended), the Q2 validation and the figures (Section 7.1) | `results/base/q2/`: `q2_3step_summary_<day>.csv`, `q2_indifference_analysis_<day>.csv`, `q2_fig1_posted_prices_<day>.png`, `q2_fig2_3step_decomposition_<day>.png`, `q2_fig3_member_gains_<day>.png`, `q2_fig3b_member_gains_soft_ir_<day>.png`, `q2_fig5_indifference_risk_<day>.png`, and per benchmark / step `base_<day>_<step>_hourly.csv`, `_members.csv`, `_member_costs.csv`, `_summary.txt` |
+| `python main.py --q2-sweep` | Question 2: contract-cap sensitivity of the pricing model (`--sweep-time-limit` per MILP) | `results/base/q2/`: `q2_cap_sensitivity_sweep_<day>.csv`, `q2_fig4_cap_sensitivity_<day>.png` |
 
 **Question 1 metrics** (`q1.metrics`), all against R (the members alone, no contract):
 
@@ -414,3 +420,32 @@ community balance (the one Gurobi returns; it is not unique in the hours at the 
 in C is its disutility + PV cost + payment; `gain_vs_R` = cost_R - cost_C and `gain_vs_I` = cost_I - cost_C (> 0:
 better off in C; `IR_vs_R`, `IR_vs_I`: gain >= 0). The budget compares what the manager collects with what it pays
 the DSO (energy, tariff, penalty); the surplus equals the cap rent.
+
+### 7.1 Question 2: dynamic pricing (`src/model_q2_pricing.py`)
+
+The manager posts one internal price `x_t` per hour and the members best-respond; the bilevel problem is
+reformulated as a single MILP:
+
+* each member's lower-level LP is replaced by its complete KKT system, every complementarity is linearised by a
+  Big-M (`--big-m`, DKK/kWh; it must exceed every dual variable), and the meter flows carry an SOS1 so that import
+  and export never overlap;
+* the payment `sum_t x_t q_i,t` is bilinear, so it is replaced by the lower level's dual objective (strong duality);
+* the mandatory decomposition is one `mode` per step (`MODES`): `cap_only` (welfare only) -> `BB` (budget balance:
+  what the manager collects equals its DSO cost) -> `BB_IR` (+ individual rationality: no member worse off than in
+  R). When `BB_IR` is infeasible or the MILP does not finish, `soft_ir` reports the minimum compensation and the
+  blocking members, and `extended` restores IR with lump-sum transfers `delta_i`;
+* `allow_price_discrimination=True` replaces `x_t` by `x_{i,t}`, the counterfactual that prices the cost of uniformity.
+
+Every run is checked a posteriori by `DynamicPricingModel.validate_solution` (`src/validation.py`): it re-solves every
+member's LP from scratch and verifies that the reported dispatch is really a best response and that the
+dual-derived payments equal `sum_t x_t q_i,t`. `analyze_indifference_risk` reports, per member, how wide its set of
+best responses is at the posted prices (the *indifference* discussion of the question); the manager is optimistic if
+it anticipates one element of that set.
+
+**Question 2 metrics** (`src/metrics.py`, DKK/day): `welfare_recovery` = (Cost_R - Cost_MP) / (Cost_R - Cost_C), in %,
+100 % = the welfare of direct control C; the efficiency cost of a requirement is Cost(step) - Cost(previous step);
+the budget balance compares the payments collected with the manager's DSO cost; the blocking members are those with
+a negative gain against R. `q2_3step_summary_<day>.csv` collects them per step.
+
+Time limits: `--q2-time-limit` (BB+IR and soft-IR, default 420 s) and `--sweep-time-limit` (each MILP of the sweep,
+default 60 s); `--mip-gap` is the relative MIP gap (default 1e-4).

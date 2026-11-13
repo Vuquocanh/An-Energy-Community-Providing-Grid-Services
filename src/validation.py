@@ -65,3 +65,148 @@ def run_q1_checks() -> bool:
     check("C settlement: manager surplus = cap rent", abs(budget["surplus_DKK"] - budget["cap_rent_DKK"]) < TOL,
           f"{budget['surplus_DKK']:.2f} vs {budget['cap_rent_DKK']:.2f} DKK")
     return ok
+
+# ----------------------------------------------------------------------------------------------
+# Question 2 validation
+# ----------------------------------------------------------------------------------------------
+# Three checks that a Q2 pricing solution must pass:
+#   1. the C dispatch is recovered (objective; the dispatch itself may be non-unique);
+#   2. the posted prices are really a best response for every member and the dual-derived payments
+#      equal the actual payments (``DynamicPricingModel.validate_solution``, stored in ``meta``);
+#   3. the manager's optimistic / pessimistic exposure when the members' best response is not
+#      unique (indifference), which is the ``short discussion about indifference`` of Question 2.
+
+from typing import Any
+
+import gurobipy as gp
+import pandas as pd
+from gurobipy import GRB
+
+from .data_loader import CommunityData
+from .model import Results
+
+
+def validate_c_dispatch_recovery(results_pricing: Results, results_MC: Results,
+                                 tol: float = 1e-2) -> dict[str, Any]:
+    """Compare a pricing run with model C.
+
+    The *objective* must match (the price can always support the C optimum in the optimistic
+    sense).  The hourly import profile and the distance to the C duals are reported as
+    information only: the C optimum -- and the price vector that supports it -- need not be
+    unique, so requiring ``x == lambda`` would be wrong.
+    """
+    gap_obj = float(results_pricing.objective - results_MC.objective)
+    gap_imp = float(np.max(np.abs(results_pricing.hourly["import"].to_numpy()
+                                  - results_MC.hourly["import"].to_numpy())))
+    info = {}
+    if "dual_balance" in results_MC.hourly.columns:
+        diff = np.abs(results_pricing.hourly["posted_price"].to_numpy()
+                      - results_MC.hourly["dual_balance"].to_numpy())
+        info["max_price_minus_lambda"] = float(diff.max())
+        info["median_price_minus_lambda"] = float(np.median(diff))
+    passed = abs(gap_obj) <= tol
+    print(f"[{'PASS' if passed else 'FAIL'}] C dispatch recovered: objective gap = {gap_obj:+.6f} DKK"
+          f" | import profile gap = {gap_imp:.4f} kWh"
+          + (f" | max |x - lambda_C| = {info['max_price_minus_lambda']:.4f} DKK/kWh (informative)"
+             if info else ""))
+
+    return {"passed": passed, "objective_gap_DKK": gap_obj,
+            "import_profile_gap_kWh": gap_imp, **info}
+
+
+def summarize_model_validation(results_pricing: Results, tol: float = 1e-4) -> dict[str, Any]:
+    """Report the independent checks that ``DynamicPricingModel.validate_solution`` stored."""
+    checks = results_pricing.meta.get("validation")
+    if not checks:
+        raise KeyError("No 'validation' entry in meta: was the model solved by DynamicPricingModel?")
+    worst = max(checks.values())
+    passed = worst <= tol
+    print(f"[{'PASS' if passed else 'FAIL'}] KKT / best response / payment identity: "
+          f"worst residual = {worst:.2e}")
+    return {"passed": passed, "max_residual": float(worst), "checks": checks}
+
+
+def analyze_indifference_risk(com_data: CommunityData, posted_prices: np.ndarray,
+                              end_soc_mode: str = "constraint",
+                              tol: float = 1e-5) -> pd.DataFrame:
+    """How wide is every member's best response at the posted prices?
+
+    With linear disutility a member's best response is a *set*, not a point.  For each member we
+    solve its LP, then -- keeping its cost within ``tol`` of the optimum -- minimise and maximise
+    its net import **in every hour**.  ``max_hourly_range_kWh`` is the widest hourly span of that
+    set and ``num_indifferent_hours`` the number of hours in which the member can move while
+    remaining exactly indifferent.  The manager is optimistic if it anticipates one element of the
+    set; the pessimistic alternative is any other element.
+    """
+    from .model import CommunityModel
+
+    records = []
+
+    for d in com_data.members:
+        i = d.consumer_id
+        follower = CommunityModel(com_data, "C", end_soc_mode=end_soc_mode)
+        follower._add_member(d)
+        T = list(follower.T)
+        net = follower.net[i]
+
+        cost = gp.quicksum(v[i] for v in follower.mexpr.values()) \
+            + gp.quicksum(float(posted_prices[t]) * net[t] for t in T)
+        follower.m.setObjective(cost, GRB.MINIMIZE)
+        follower.m.Params.OutputFlag = 0
+        follower.m.optimize()
+        if follower.m.Status != GRB.OPTIMAL:
+            raise RuntimeError(f"Member LP failed for {i}")
+        min_cost = follower.m.ObjVal
+        follower.m.addConstr(cost <= min_cost + tol, name="opt_cost_bound")
+
+        lo, hi = [], []
+        for t in T:
+            follower.m.setObjective(net[t], GRB.MINIMIZE)
+            follower.m.optimize()
+            lo.append(net[t].getValue())
+            follower.m.setObjective(net[t], GRB.MAXIMIZE)
+            follower.m.optimize()
+            hi.append(net[t].getValue())
+        lo, hi = np.array(lo), np.array(hi)
+        spread = hi - lo
+
+        records.append(
+            {
+                "member": i,
+                "archetype": d.archetype,
+                "disutility_slope": d.linear_disutility,
+                "min_cost_DKK": round(min_cost, 4),
+                "max_hourly_range_kWh": round(float(np.abs(spread).max()), 4),
+                "num_indifferent_hours": int((np.abs(spread) > 1e-3).sum()),
+                "has_indifference": bool(np.abs(spread).max() > 1e-3),
+            }
+        )
+        follower.m.dispose()
+
+    df = pd.DataFrame(records).set_index("member")
+    n = int(df["has_indifference"].sum())
+    worst = df["max_hourly_range_kWh"].max()
+    print(f"[INFO] Indifference: {n}/{len(df)} members have multiple optimal responses; "
+          f"the largest hourly range of a best response is {worst:.2f} kWh/h. "
+          f"The manager is optimistic if it anticipates one element of that set.")
+    return df
+
+
+def run_q2_validation_pipeline(com_data: CommunityData, results_cap: Results,
+                               results_MC: Results, model_pricing: Any) -> dict[str, Any]:
+    """Full Q2 validation: C recovery, independent KKT checks, indifference analysis."""
+    print("\n" + "=" * 60)
+    print(" Running Question 2 validation pipeline")
+    print("=" * 60)
+
+    res_duals = validate_c_dispatch_recovery(results_cap, results_MC)
+    res_kkt = summarize_model_validation(results_cap)
+
+    posted_x = results_cap.hourly["posted_price"].to_numpy()
+    df_indiff = analyze_indifference_risk(com_data, posted_x)
+
+    return {
+        "c_recovery": res_duals,
+        "kkt_residuals": res_kkt,
+        "indifference_analysis": df_indiff,
+    }
