@@ -8,8 +8,11 @@
     python main.py --q2 --q2-time-limit 900          # give the BB+IR / soft-IR MILPs more time
     python main.py --q2-sweep                        # Question 2 contract-cap sensitivity study + figure
     python main.py --q2 --day d2                     # Question 2 experiments on day d2
-    python main.py --demo                            # scenario-generation demonstration (Question 3)
     python main.py --verify                          # Question 1 validation checks
+    python main.py --q1-base                         # Question 1: R, I and C on the base case (results/q1_base/)
+    python main.py --plot-data                       # input data of d1-d7: prices, reference load, PV, cap (results/data/)
+    python main.py --q1-sensitivity                  # Question 1: sweeps of the discount and of the cap (results/q1_sensitivity/)
+    python main.py --demo                            # scenario-generation demonstration (Question 3)
 
 The Q2 flow follows the mandatory decomposition of the assignment:
     step 1  cap only                 (M^P_cap)
@@ -38,13 +41,15 @@ from src.metrics import (
 from src.model import CommunityModel
 from src.model_q2_pricing import DynamicPricingModel, NoPricingSolution
 from src.plotting import (
+    plot_day_data,
     plot_q2_3step_decomposition,
     plot_q2_cap_sensitivity,
     plot_q2_indifference_risk,
     plot_q2_member_gains_and_blocking,
     plot_q2_posted_prices,
 )
-from src.data_loader import load_community, list_communities
+from src.data_loader import DAYS, load_community, list_communities
+from src.q1 import run_q1_base, run_q1_sensitivity
 from src.validation import analyze_indifference_risk, run_q1_checks, run_q2_validation_pipeline
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -310,6 +315,9 @@ def main() -> None:
     ap.add_argument("--community", default="base", help=f"base (shipped) or your own params_community_<name>.json; available: {list_communities()}")
     ap.add_argument("--day", default="d1", help="d1 (base case) ... d7")
     ap.add_argument("--members", action="store_true", help="print the Assignment 1 summary of every member")
+    ap.add_argument("--q1-base", action="store_true", help="Question 1: R, I and C on the base community (day: --day)")
+    ap.add_argument("--plot-data", action="store_true", help="plot the input data of every day d1-d7 (base community)")
+    ap.add_argument("--q1-sensitivity", action="store_true", help="Question 1: sweeps of the discount beta and of the cap (d1)")
     ap.add_argument("--q2", action="store_true", help="run Question 2 dynamic pricing models & generate figures")
     ap.add_argument("--q2-sweep", action="store_true", help="run Question 2 contract-cap sensitivity sweep & generate figure")
     ap.add_argument("--q2-time-limit", type=float, default=420, help="time limit (s) of each BB+IR / soft-IR MILP")
@@ -332,6 +340,16 @@ def main() -> None:
     print("Individual caps in model I (kW), hour 0 / hour 11:",
           "  ".join(f"{cid} ({com.member(cid).archetype}) {ic[cid][0]:.2f}/{ic[cid][11]:.2f}" for cid in ("C1", "C1_PVB", "C4", "C4_PVB") if cid in com.member_ids))
     (RESULTS_DIR / args.community).mkdir(parents=True, exist_ok=True)
+
+    if args.q1_base:
+        run_q1_base(RESULTS_DIR / "q1_base", day=args.day)
+
+    if args.plot_data:
+        for day in DAYS:
+            plot_day_data(load_community("base", day=day), save_to=RESULTS_DIR / "data" / f"data_{day}.png")
+
+    if args.q1_sensitivity:
+        run_q1_sensitivity(RESULTS_DIR / "q1_sensitivity")
 
     if args.q2:
         run_q2_3step_decomposition(args.community, args.day, time_limit=args.q2_time_limit,
