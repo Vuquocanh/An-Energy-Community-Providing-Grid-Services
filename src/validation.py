@@ -6,6 +6,7 @@ import numpy as np
 
 from .data_loader import DAYS, load_community
 from .model import CommunityModel
+from .q1 import settlement
 
 TOL = 1e-6
 
@@ -15,7 +16,8 @@ def run_q1_checks() -> bool:
 
     R against the reference values of dso_contract_params.json (cost, d1-d7), the limit cases
     (joint model = member by member; I with beta = 0 and no cap = R), the exceedance variables,
-    the balance at the community meter, C <= I, and the 18 hours at the cap on d1 (assignment text).
+    the balance at the community meter, C <= I, the 18 hours at the cap on d1 (assignment text), and the
+    manager's surplus in the settlement of C = the cap rent (complementary slackness).
     """
     ok = True
 
@@ -59,20 +61,20 @@ def run_q1_checks() -> bool:
     check("C <= I (same contract)", C.objective <= I.objective + TOL, f"{C.objective:.2f} vs {I.objective:.2f}")
     at_cap = int(np.isclose(h["import"], h["cap"]).sum())
     check("C at the cap in 18 hours of d1 (assignment)", at_cap == 18, f"{at_cap} hours")
+    _, budget = settlement({"R": R, "I": I, "C": C})
+    check("C settlement: manager surplus = cap rent", abs(budget["surplus_DKK"] - budget["cap_rent_DKK"]) < TOL,
+          f"{budget['surplus_DKK']:.2f} vs {budget['cap_rent_DKK']:.2f} DKK")
     return ok
-
 
 # ----------------------------------------------------------------------------------------------
 # Question 2 validation
 # ----------------------------------------------------------------------------------------------
-"""Three checks that a Q2 pricing solution must pass:
-
-1. the C dispatch is recovered (objective; the dispatch itself may be non-unique);
-2. the posted prices are really a best response for every member and the dual-derived payments
-   equal the actual payments (``DynamicPricingModel.validate_solution``, stored in ``meta``);
-3. the manager's optimistic / pessimistic exposure when the members' best response is not unique
-   (indifference), which is the ``short discussion about indifference`` of Question 2.
-"""
+# Three checks that a Q2 pricing solution must pass:
+#   1. the C dispatch is recovered (objective; the dispatch itself may be non-unique);
+#   2. the posted prices are really a best response for every member and the dual-derived payments
+#      equal the actual payments (``DynamicPricingModel.validate_solution``, stored in ``meta``);
+#   3. the manager's optimistic / pessimistic exposure when the members' best response is not
+#      unique (indifference), which is the ``short discussion about indifference`` of Question 2.
 
 from typing import Any
 
