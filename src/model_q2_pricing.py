@@ -117,8 +117,8 @@ class DynamicPricingModel:
             raise ValueError("Unknown end_soc_mode")
         if time_limit <= 0:
             raise ValueError("time_limit must be positive")
-        if price_bounds is not None and price_bounds[0] > price_bounds[1]:
-            raise ValueError("price_bounds must be (lower, upper)")
+        if price_bounds is not None and np.any(np.asarray(price_bounds[0]) > np.asarray(price_bounds[1])):
+            raise ValueError("price_bounds must be (lower, upper), scalars or one value per hour")
         self.T = range(com.members[0].n_hours)
         self.ids = com.member_ids
 
@@ -182,11 +182,19 @@ class DynamicPricingModel:
     def _add_upper_level_variables(self) -> None:
         """Add posted prices x_t (or x_{i,t}) and optional transfer/slack variables."""
         m, T, ids = self.m, self.T, self.ids
+        # hourly bounds: scalars or 24-vectors, broadcast to one (lb, ub) per hour
         lo, hi = (-GRB.INFINITY, GRB.INFINITY) if self.price_bounds is None else self.price_bounds
+        lo = np.broadcast_to(np.asarray(lo, dtype=float), (len(T),))
+        hi = np.broadcast_to(np.asarray(hi, dtype=float), (len(T),))
         if self.allow_price_discrimination:
-            x = m.addVars(ids, T, lb=lo, ub=hi, name="x_price")
+            x = m.addVars(ids, T, lb=-GRB.INFINITY, name="x_price")
+            for i in ids:
+                for t in T:
+                    x[i, t].LB, x[i, t].UB = lo[t], hi[t]
         else:
-            x_uni = m.addVars(T, lb=lo, ub=hi, name="x_price_uni")
+            x_uni = m.addVars(T, lb=-GRB.INFINITY, name="x_price_uni")
+            for t in T:
+                x_uni[t].LB, x_uni[t].UB = lo[t], hi[t]
             x = {(i, t): x_uni[t] for i in ids for t in T}
         self.var["x_price"] = x
 
@@ -669,3 +677,12 @@ class DynamicPricingModel:
     @staticmethod
     def _put(store: dict, name: str, i: str, item) -> None:
         store.setdefault(name, {})[i] = item
+
+    @staticmethod
+    def default_price_bounds(com: CommunityData) -> tuple[np.ndarray, np.ndarray]:
+        """Hourly bounds on the posted price, DKK/kWh: never negative, never above the penalised import
+        price p_t + tau_imp + alpha, beyond which no member's best response changes. One pair per hour."""
+        c = com.contract
+        p = np.asarray(com.energy_price, dtype=float)
+        return np.zeros_like(p), p + com.import_tariff + c.penalty_DKK_per_kWh
+    
