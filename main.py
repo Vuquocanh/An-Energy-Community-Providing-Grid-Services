@@ -68,12 +68,13 @@ def _print_checks(name: str, res) -> None:
 
 def _build_and_solve(com, mode: str, benchmarks: dict[str, float] | None,
                      time_limit: float, warm_from=None, mip_focus: int = 0,
-                     big_m: float = 100.0, mip_gap: float = 1e-3):
+                     big_m: float = 25.0, mip_gap: float = 1e-3):
     """Build one pricing variant, optionally warm-start it, and solve it.
 
     Returns ``(model, results)``; ``results`` is None when the solver produced no incumbent.
     """
     model = DynamicPricingModel(com, mode=mode, benchmark_costs=benchmarks, big_m=big_m,
+                                price_bounds=DynamicPricingModel.default_price_bounds(com),
                                 mip_gap=mip_gap, time_limit=time_limit, mip_focus=mip_focus).build()
     if warm_from is not None:
         n = model.warm_start_from(warm_from)
@@ -88,7 +89,7 @@ def _build_and_solve(com, mode: str, benchmarks: dict[str, float] | None,
 
 
 def run_q2_3step_decomposition(community_name: str = "base", day: str = "d1",
-                               time_limit: float = 420, big_m: float = 100.0,
+                               time_limit: float = 420, big_m: float = 25.0,
                                mip_gap: float = 1e-4) -> None:
     """Question 2 mandatory 3-step pricing decomposition, validation and figures.
 
@@ -119,6 +120,7 @@ def run_q2_3step_decomposition(community_name: str = "base", day: str = "d1",
     # 3. Step 1: cap only
     print("\n[Step 1] Model M^P_cap (cap only)...")
     m_cap = DynamicPricingModel(com, mode="cap_only", big_m=big_m, mip_gap=mip_gap,
+                                price_bounds=DynamicPricingModel.default_price_bounds(com),
                                 time_limit=time_limit).build()
     res_cap = m_cap.solve()
     res_cap.save(res_dir, tag=f"step1_cap_only_{day}")
@@ -221,7 +223,7 @@ def run_q2_3step_decomposition(community_name: str = "base", day: str = "d1",
 #-------------------q2 Experiments/Sensitivity---------------
 
 def run_q2_sensitivity_sweep(community_name: str = "base", day: str = "d1",
-                             time_limit: float = 60, big_m: float = 100.0,
+                             time_limit: float = 60, big_m: float = 25.0,
                              mip_gap: float = 1e-4) -> None:
     """Contract-cap sensitivity study: cap_t = shipped cap_t * cap_factor.
 
@@ -322,7 +324,7 @@ def main() -> None:
     ap.add_argument("--q2-sweep", action="store_true", help="run Question 2 contract-cap sensitivity sweep & generate figure")
     ap.add_argument("--q2-time-limit", type=float, default=420, help="time limit (s) of each BB+IR / soft-IR MILP")
     ap.add_argument("--sweep-time-limit", type=float, default=60, help="time limit (s) of each MILP in the sweep")
-    ap.add_argument("--big-m", type=float, default=100.0,
+    ap.add_argument("--big-m", type=float, default=25.0,
                     help="Big-M of the KKT complementarities (DKK/kWh); it must exceed every dual variable")
     ap.add_argument("--mip-gap", type=float, default=1e-4, help="relative MIP gap of the pricing models")
     ap.add_argument("--demo", action="store_true", help="run the scenario-generation demonstration")
