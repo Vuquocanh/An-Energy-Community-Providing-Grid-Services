@@ -69,7 +69,9 @@ class DynamicPricingModel:
         DKK/kWh of the energy left in the battery at t = 24 when ``end_soc_mode='objective'``;
         default the member's ``energy_price[-1] + import_tariff``, as in ``CommunityModel``.
     big_m : float
-        Big-M of the complementarity constraints, DKK/kWh.  It must exceed every dual variable.
+        Big-M of the complementarity constraints, DKK/kWh. Must exceed every dual variable: with the prices
+        bounded by p_t + tau_imp + alpha (< 13 on d1), every multiplier is below ~15, so 25 is safe;
+        ``validate_solution`` reports the largest dual relative to M (``max_dual_over_bigM``).
     price_bounds : (float, float) | None
         Optional bounds on every posted price (a modelling choice of Table 11; None = free price).
     ir_penalty : float
@@ -88,7 +90,7 @@ class DynamicPricingModel:
         allow_price_discrimination: bool = False,
         end_soc_mode: Literal["constraint", "objective", "free"] = "constraint",
         final_soc_price: float | None = None,
-        big_m: float = 500.0,
+        big_m: float = 25.0,
         price_bounds: tuple[float, float] | None = None,
         ir_penalty: float = 1e3,
         mip_gap: float = 1e-3,
@@ -549,6 +551,7 @@ class DynamicPricingModel:
             "max_payment_identity_error": max(payment_errors),
             "max_best_response_gap": max(response_errors),
             "max_complementarity_product": max(abs(a.X * b.X) for a, b in self.complementarity_pairs),
+            "max_dual_over_bigM": max(abs(a.X) for a, _ in self.complementarity_pairs) / self.big_m,
             "max_meter_error": max(meter_errors),
             "max_exceedance_error": max(exc_errors),
             "max_simultaneous_grid_flow": max(overlap),
@@ -563,7 +566,9 @@ class DynamicPricingModel:
             checks["total_ir_slack"] = slacks
 
         # total_ir_slack is a reported quantity, not a residual: do not compare it with the tolerance
-        residuals = {k: v for k, v in checks.items() if k != "total_ir_slack"}
+        residuals = {k: v for k, v in checks.items() if k not in ("total_ir_slack", "max_dual_over_bigM")}
+        if checks["max_dual_over_bigM"] > 0.9:
+            raise RuntimeError(f"big_m={self.big_m} is too small: a dual reached {checks['max_dual_over_bigM']:.0%} of it")
         if max(residuals.values()) > tolerance:
             raise RuntimeError(f"Pricing solution failed independent checks: {checks}")
         return checks
