@@ -114,16 +114,20 @@ def validate_c_dispatch_recovery(results_pricing: Results, results_MC: Results,
             "import_profile_gap_kWh": gap_imp, **info}
 
 
-def summarize_model_validation(results_pricing: Results, tol: float = 1e-4) -> dict[str, Any]:
-    """Report the independent checks that ``DynamicPricingModel.validate_solution`` stored."""
+def summarize_model_validation(results_pricing: Results, tol: float | None = None) -> dict[str, Any]:
+    """Report the independent checks that ``DynamicPricingModel.validate_solution`` stored.
+
+    ``tol`` defaults to the tolerance the model itself used (stored in the checks), so both agree."""
     checks = results_pricing.meta.get("validation")
     if not checks:
         raise KeyError("No 'validation' entry in meta: was the model solved by DynamicPricingModel?")
-    worst = max(checks.values())
+    tol = checks.get("tolerance", 1e-4) if tol is None else tol
+    reported = ("tolerance", "max_dual_over_bigM", "total_ir_slack")   # read, not residuals
+    worst = max(v for k, v in checks.items() if k not in reported)
     passed = worst <= tol
     print(f"[{'PASS' if passed else 'FAIL'}] KKT / best response / payment identity: "
-          f"worst residual = {worst:.2e}")
-    return {"passed": passed, "max_residual": float(worst), "checks": checks}
+          f"worst residual = {worst:.2e} (tolerance {tol:.1e}); max dual / big-M = {checks.get('max_dual_over_bigM', float('nan')):.2f}")
+    return {"passed": passed, "max_residual": float(worst), "tolerance": float(tol), "checks": checks}
 
 
 def analyze_indifference_risk(com_data: CommunityData, posted_prices: np.ndarray,

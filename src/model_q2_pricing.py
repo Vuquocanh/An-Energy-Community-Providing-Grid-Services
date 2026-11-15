@@ -508,7 +508,7 @@ class DynamicPricingModel:
         numerical noise, not a modelling error.
         """
         if tolerance is None:
-            tolerance = max(5e-4, 2.0 * float(self.m.Params.FeasibilityTol) * self.big_m)
+            tolerance = max(1e-4, 10.0 * float(self.m.Params.FeasibilityTol) * self.big_m)   # 2.5e-4 at M = 25
         from .model import CommunityModel
 
         payment_errors, response_errors, ir_errors = [], [], []
@@ -558,6 +558,7 @@ class DynamicPricingModel:
             "max_linear_constraint_violation": self.m.ConstrVio,
             "max_bound_violation": self.m.BoundVio,
         }
+        checks["tolerance"] = tolerance
         if self.mode != "cap_only":
             checks["budget_error_after_transfers"] = abs(actual_payments - transfers - self.expr["dso_cost"].getValue())
         if ir_errors:
@@ -566,7 +567,7 @@ class DynamicPricingModel:
             checks["total_ir_slack"] = slacks
 
         # total_ir_slack is a reported quantity, not a residual: do not compare it with the tolerance
-        residuals = {k: v for k, v in checks.items() if k not in ("total_ir_slack", "max_dual_over_bigM")}
+        residuals = {k: v for k, v in checks.items() if k not in ("total_ir_slack", "max_dual_over_bigM", "tolerance")}
         if checks["max_dual_over_bigM"] > 0.9:
             raise RuntimeError(f"big_m={self.big_m} is too small: a dual reached {checks['max_dual_over_bigM']:.0%} of it")
         if max(residuals.values()) > tolerance:
