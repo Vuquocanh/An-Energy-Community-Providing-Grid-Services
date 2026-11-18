@@ -69,7 +69,9 @@ class DynamicPricingModel:
         DKK/kWh of the energy left in the battery at t = 24 when ``end_soc_mode='objective'``;
         default the member's ``energy_price[-1] + import_tariff``, as in ``CommunityModel``.
     big_m : float
-        Big-M of the complementarity constraints, DKK/kWh.  It must exceed every dual variable.
+        Big-M of the complementarity constraints, DKK/kWh. Must exceed every dual variable: with the prices
+        bounded by p_t + tau_imp + alpha (< 13 on d1), every multiplier is below ~15, so 25 is safe;
+        ``validate_solution`` reports the largest dual relative to M (``max_dual_over_bigM``).
     price_bounds : (float, float) | None
         Optional bounds on every posted price (a modelling choice of Table 11; None = free price).
     ir_penalty : float
@@ -88,7 +90,7 @@ class DynamicPricingModel:
         allow_price_discrimination: bool = False,
         end_soc_mode: Literal["constraint", "objective", "free"] = "constraint",
         final_soc_price: float | None = None,
-        big_m: float = 500.0,
+        big_m: float = 25.0,
         price_bounds: tuple[float, float] | None = None,
         ir_penalty: float = 1e3,
         mip_gap: float = 1e-3,
@@ -117,8 +119,8 @@ class DynamicPricingModel:
             raise ValueError("Unknown end_soc_mode")
         if time_limit <= 0:
             raise ValueError("time_limit must be positive")
-        if price_bounds is not None and price_bounds[0] > price_bounds[1]:
-            raise ValueError("price_bounds must be (lower, upper)")
+        if price_bounds is not None and np.any(np.asarray(price_bounds[0]) > np.asarray(price_bounds[1])):
+            raise ValueError("price_bounds must be (lower, upper), scalars or one value per hour")
         self.T = range(com.members[0].n_hours)
         self.ids = com.member_ids
 
@@ -182,11 +184,19 @@ class DynamicPricingModel:
     def _add_upper_level_variables(self) -> None:
         """Add posted prices x_t (or x_{i,t}) and optional transfer/slack variables."""
         m, T, ids = self.m, self.T, self.ids
+        # hourly bounds: scalars or 24-vectors, broadcast to one (lb, ub) per hour
         lo, hi = (-GRB.INFINITY, GRB.INFINITY) if self.price_bounds is None else self.price_bounds
+        lo = np.broadcast_to(np.asarray(lo, dtype=float), (len(T),))
+        hi = np.broadcast_to(np.asarray(hi, dtype=float), (len(T),))
         if self.allow_price_discrimination:
-            x = m.addVars(ids, T, lb=lo, ub=hi, name="x_price")
+            x = m.addVars(ids, T, lb=-GRB.INFINITY, name="x_price")
+            for i in ids:
+                for t in T:
+                    x[i, t].LB, x[i, t].UB = lo[t], hi[t]
         else:
-            x_uni = m.addVars(T, lb=lo, ub=hi, name="x_price_uni")
+            x_uni = m.addVars(T, lb=-GRB.INFINITY, name="x_price_uni")
+            for t in T:
+                x_uni[t].LB, x_uni[t].UB = lo[t], hi[t]
             x = {(i, t): x_uni[t] for i in ids for t in T}
         self.var["x_price"] = x
 
@@ -498,7 +508,7 @@ class DynamicPricingModel:
         numerical noise, not a modelling error.
         """
         if tolerance is None:
-            tolerance = max(5e-4, 2.0 * float(self.m.Params.FeasibilityTol) * self.big_m)
+            tolerance = max(1e-4, 10.0 * float(self.m.Params.FeasibilityTol) * self.big_m)   # 2.5e-4 at M = 25
         from .model import CommunityModel
 
         payment_errors, response_errors, ir_errors = [], [], []
@@ -541,12 +551,14 @@ class DynamicPricingModel:
             "max_payment_identity_error": max(payment_errors),
             "max_best_response_gap": max(response_errors),
             "max_complementarity_product": max(abs(a.X * b.X) for a, b in self.complementarity_pairs),
+            "max_dual_over_bigM": max(abs(a.X) for a, _ in self.complementarity_pairs) / self.big_m,
             "max_meter_error": max(meter_errors),
             "max_exceedance_error": max(exc_errors),
             "max_simultaneous_grid_flow": max(overlap),
             "max_linear_constraint_violation": self.m.ConstrVio,
             "max_bound_violation": self.m.BoundVio,
         }
+        checks["tolerance"] = tolerance
         if self.mode != "cap_only":
             checks["budget_error_after_transfers"] = abs(actual_payments - transfers - self.expr["dso_cost"].getValue())
         if ir_errors:
@@ -555,7 +567,9 @@ class DynamicPricingModel:
             checks["total_ir_slack"] = slacks
 
         # total_ir_slack is a reported quantity, not a residual: do not compare it with the tolerance
-        residuals = {k: v for k, v in checks.items() if k != "total_ir_slack"}
+        residuals = {k: v for k, v in checks.items() if k not in ("total_ir_slack", "max_dual_over_bigM", "tolerance")}
+        if checks["max_dual_over_bigM"] > 0.9:
+            raise RuntimeError(f"big_m={self.big_m} is too small: a dual reached {checks['max_dual_over_bigM']:.0%} of it")
         if max(residuals.values()) > tolerance:
             raise RuntimeError(f"Pricing solution failed independent checks: {checks}")
         return checks
@@ -669,3 +683,12 @@ class DynamicPricingModel:
     @staticmethod
     def _put(store: dict, name: str, i: str, item) -> None:
         store.setdefault(name, {})[i] = item
+
+    @staticmethod
+    def default_price_bounds(com: CommunityData) -> tuple[np.ndarray, np.ndarray]:
+        """Hourly bounds on the posted price, DKK/kWh: never negative, never above the penalised import
+        price p_t + tau_imp + alpha, beyond which no member's best response changes. One pair per hour."""
+        c = com.contract
+        p = np.asarray(com.energy_price, dtype=float)
+        return np.zeros_like(p), p + com.import_tariff + c.penalty_DKK_per_kWh
+    
