@@ -7,7 +7,10 @@ bilevel problem is rewritten as a single-level MPEC:
 1. Lower level: each member's LP (load, deviation, daily minimum, PV, battery, end-of-day SoC).
 2. Reformulation: the lower level is replaced by its complete KKT system -- stationarity, dual
    feasibility and complementarity -- with every complementarity linearised by a Big-M
-   (``_complementarity``).  The meter flows carry an SOS1 so that import and export never overlap.
+   (``_complementarity``).  The meter exceedance is the continuous ``e_t >= P_t - cap_t``: since the
+   DSO bill is part of the welfare objective, a fictitious exceedance or a simultaneous import and
+   export costs welfare one for one, so the optimum never uses them; ``validate_solution`` checks
+   this and ``exact_exceedance=True`` adds one binary and one SOS1 per hour if it ever fails.
 3. Dual trick: the payment ``sum_t x_t q_{i,t}`` is bilinear (price x dispatch); by lower-level
    strong duality it equals the member's dual objective, which is linear in the dual variables.
 4. Requirements (the mandatory Q2 decomposition and the infeasibility extensions):
@@ -74,6 +77,10 @@ class DynamicPricingModel:
         ``validate_solution`` reports the largest dual relative to M (``max_dual_over_bigM``).
     price_bounds : (float, float) | None
         Optional bounds on every posted price (a modelling choice of Table 11; None = free price).
+    exact_exceedance : bool
+        False (default): continuous exceedance, checked a posteriori. True: one binary per hour forces
+        ``e_t = max(0, P_t - cap_t)`` exactly and an SOS1 forbids simultaneous import and export; use it
+        only if the default fails ``validate_solution`` (fictitious exceedance to balance the budget).
     ir_penalty : float
         Weight of ``sum_i s_i`` in the objective of ``soft_ir`` (DKK per DKK of compensation).
     mip_gap, time_limit : float
@@ -92,6 +99,7 @@ class DynamicPricingModel:
         final_soc_price: float | None = None,
         big_m: float = 25.0,
         price_bounds: tuple[float, float] | None = None,
+        exact_exceedance: bool = False,
         ir_penalty: float = 1e3,
         mip_gap: float = 1e-3,
         time_limit: float = 300,
@@ -111,6 +119,7 @@ class DynamicPricingModel:
         self.final_soc_price = final_soc_price
         self.big_m = float(big_m)
         self.price_bounds = price_bounds
+        self.exact_exceedance = bool(exact_exceedance)
         self.ir_penalty = float(ir_penalty)
 
         if not np.isfinite(self.big_m) or self.big_m <= 0:
@@ -221,9 +230,14 @@ class DynamicPricingModel:
         net = {t: gp.LinExpr(load[t]) for t in T}
 
         if d.has_pv:
-            pv = m.addVars(T, lb=0.0, name=f"pv_{i}")
+            # PV is modelled only in hours with availability. Where pv_available = 0 the bounds
+            # 0 <= pv <= 0 coincide, so the multiplier of the upper bound is undetermined (it can sit
+            # anywhere up to M, which breaks the big-M check) and the pair adds two binaries that
+            # carry no information. pv_t = 0 is implied in those hours.
+            T_pv = [t for t in T if d.pv_available[t] > 1e-9]
+            pv = m.addVars(T_pv, lb=0.0, name=f"pv_{i}")
             self._put(self.mvar, "pv", i, pv)
-            for t in T:
+            for t in T_pv:
                 net[t].add(pv[t], -1.0)
 
         if d.has_battery:
@@ -252,7 +266,7 @@ class DynamicPricingModel:
         self.mvar.setdefault("dual_min_daily_energy", {})[i] = mu_energy
 
         if d.has_pv:
-            phi_pv = m.addVars(T, lb=0.0, name=f"phi_pv_{i}")
+            phi_pv = m.addVars(T_pv, lb=0.0, name=f"phi_pv_{i}")
             self._put(self.mvar, "dual_pv_max", i, phi_pv)
 
         if d.has_battery:
@@ -286,7 +300,7 @@ class DynamicPricingModel:
         self._complementarity(mu_energy, load.sum() - d.min_daily_energy_kWh, f"energy_{i}")
 
         if d.has_pv:
-            for t in T:
+            for t in T_pv:
                 m.addConstr(pv[t] <= d.pv_available[t], name=f"c_pv_max_{i}_{t}")
                 self._complementarity(phi_pv[t], d.pv_available[t] - pv[t], f"pv_upper_{i}_{t}")
 
@@ -320,7 +334,7 @@ class DynamicPricingModel:
             m.addConstr(x[i, t] + alpha_up[t] - alpha_dn[t] - nu_lower[t] + nu_upper[t] - mu_energy == 0, name=f"stat_load_{i}_{t}")
             self._complementarity(dev[t], c_L - alpha_up[t] - alpha_dn[t], f"stat_dev_{i}_{t}")
 
-            if d.has_pv:
+            if d.has_pv and t in pv:
                 self._complementarity(pv[t], -x[i, t] + c_PV + phi_pv[t], f"stat_pv_{i}_{t}")
 
             if d.has_battery:
@@ -349,7 +363,7 @@ class DynamicPricingModel:
         for t in T:
             dual_obj.add(alpha_dn[t] * ref[t] - alpha_up[t] * ref[t])
             dual_obj.add(nu_lower[t] * d.load_lower_kWh[t] - nu_upper[t] * d.load_upper_kWh[t])
-            if d.has_pv:
+            if d.has_pv and t in pv:
                 dual_obj.add(-phi_pv[t] * d.pv_available[t])
             if d.has_battery:
                 dual_obj.add(-gamma_ch[t] * d.battery_max_charge_kW)
@@ -393,15 +407,15 @@ class DynamicPricingModel:
 
         for t in T:
             m.addConstr(imp[t] - exp[t] == gp.quicksum(self.net[i][t] for i in self.ids), name=f"comm_bal_{t}")
-            # e_t = max(0, import - cap) *exactly*: with budget balance the DSO cost is an equality
-            # constraint, so leaving only e_t >= import - cap lets the model inflate the manager's
-            # cost (and hence balance the budget) by declaring a fictitious exceedance.
+            # e_t >= P_t - cap_t is enough: the DSO bill is in the welfare objective, so declaring
+            # exceedance that is not due costs (tau+alpha) - (1-beta)tau per kWh, and importing and
+            # exporting at once costs (1-beta)(tau_imp+tau_exp) per kWh. validate_solution checks both.
             m.addConstr(exc[t] >= imp[t] - c.capacity_limit_kW[t], name=f"comm_cap_{t}")
-            z_cap = m.addVar(vtype=GRB.BINARY, name=f"cap_binary_{t}")
-            m.addConstr(exc[t] <= self.big_m * z_cap, name=f"exc_zero_{t}")
-            m.addConstr(exc[t] <= imp[t] - c.capacity_limit_kW[t] + self.big_m * (1 - z_cap), name=f"exc_exact_{t}")
-            # One meter: no simultaneous import and export.
-            m.addSOS(GRB.SOS_TYPE1, [imp[t], exp[t]])
+            if self.exact_exceedance:
+                z_cap = m.addVar(vtype=GRB.BINARY, name=f"cap_binary_{t}")
+                m.addConstr(exc[t] <= self.big_m * z_cap, name=f"exc_zero_{t}")
+                m.addConstr(exc[t] <= imp[t] - c.capacity_limit_kW[t] + self.big_m * (1 - z_cap), name=f"exc_exact_{t}")
+                m.addSOS(GRB.SOS_TYPE1, [imp[t], exp[t]])
 
         f = 1.0 - c.tariff_discount_ratio
         tau_imp, tau_exp = self.com.import_tariff, self.com.export_tariff
@@ -570,6 +584,13 @@ class DynamicPricingModel:
         residuals = {k: v for k, v in checks.items() if k not in ("total_ir_slack", "max_dual_over_bigM", "tolerance")}
         if checks["max_dual_over_bigM"] > 0.9:
             raise RuntimeError(f"big_m={self.big_m} is too small: a dual reached {checks['max_dual_over_bigM']:.0%} of it")
+        meter_fail = max(checks["max_exceedance_error"], checks["max_simultaneous_grid_flow"]) > tolerance
+        if meter_fail and not self.exact_exceedance:
+            raise RuntimeError(
+                "Meter check failed: exceedance billed that is not due, or import and export in the same hour "
+                f"(exceedance error {checks['max_exceedance_error']:.3g}, overlap {checks['max_simultaneous_grid_flow']:.3g}). "
+                "No bounded uniform price balances the budget without it: rebuild with exact_exceedance=True "
+                "and report the case.")
         if max(residuals.values()) > tolerance:
             raise RuntimeError(f"Pricing solution failed independent checks: {checks}")
         return checks
@@ -594,12 +615,13 @@ class DynamicPricingModel:
                     for t in T:
                         if t in v:
                             item = v[t]
-                            col_vals.append(item.X if hasattr(item, "X") else item)
                         elif (t + 1) in v:
                             item = v[t + 1]
-                            col_vals.append(item.X if hasattr(item, "X") else item)
-                    if len(col_vals) == len(T):
-                        df[name] = col_vals
+                        else:                      # variable not defined in this hour (PV at night) = 0
+                            col_vals.append(0.0)
+                            continue
+                        col_vals.append(item.X if hasattr(item, "X") else item)
+                    df[name] = col_vals
 
             df["net"] = [self.net[i][t].getValue() for t in T]
             frames[i] = df
@@ -675,6 +697,7 @@ class DynamicPricingModel:
                   "solver_gap": self.m.MIPGap, "runtime": self.m.Runtime,
                   "end_soc_mode": self.end_soc_mode,
                   "price_bounds": self.price_bounds,
+                  "exact_exceedance": self.exact_exceedance,
                   "allow_price_discrimination": self.allow_price_discrimination},
             members=members,
             member_costs=costs,
