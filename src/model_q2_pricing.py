@@ -81,6 +81,13 @@ class DynamicPricingModel:
         False (default): continuous exceedance, checked a posteriori. True: one binary per hour forces
         ``e_t = max(0, P_t - cap_t)`` exactly and an SOS1 forbids simultaneous import and export; use it
         only if the default fails ``validate_solution`` (fictitious exceedance to balance the budget).
+    price_rule : {'minmax', 'none'}
+        Selection among the optimal prices (formative feedback 1.4). 'minmax': the welfare-optimal
+        dispatch of the first solve is kept (complementarity binaries fixed), and among the prices that
+        support it two LPs pick the ones closest to the meter's marginal-cost band
+        [p_t - (1-beta) tau_exp, p_t + (1-beta) tau_imp]: first the largest hourly deviation, then its
+        sum. Lexicographic, so no weight to tune. 'none': the prices are whatever the first solve
+        returns (undetermined in the hours where members are indifferent).
     ir_penalty : float
         Weight of ``sum_i s_i`` in the objective of ``soft_ir`` (DKK per DKK of compensation).
     mip_gap, time_limit : float
@@ -100,6 +107,8 @@ class DynamicPricingModel:
         big_m: float = 25.0,
         price_bounds: tuple[float, float] | None = None,
         exact_exceedance: bool = False,
+        price_rule: Literal["none", "minmax"] = "minmax",
+        lex_tol: float = 1e-4,
         ir_penalty: float = 1e3,
         mip_gap: float = 1e-3,
         time_limit: float = 300,
@@ -120,6 +129,12 @@ class DynamicPricingModel:
         self.big_m = float(big_m)
         self.price_bounds = price_bounds
         self.exact_exceedance = bool(exact_exceedance)
+        self.price_rule = price_rule
+        self.lex_tol = float(lex_tol)
+        self.stage1: dict[str, float] = {}
+        self.stage2: dict[str, float] = {}
+        if price_rule not in ("none", "minmax"):
+            raise ValueError("price_rule must be 'none' or 'minmax'")
         self.ir_penalty = float(ir_penalty)
 
         if not np.isfinite(self.big_m) or self.big_m <= 0:
@@ -502,11 +517,59 @@ class DynamicPricingModel:
         ):
             if self.m.Status == GRB.TIME_LIMIT:
                 print("  [WARNING] Optimization hit TIME_LIMIT, using the best feasible solution found.")
+            if self.price_rule == "minmax":
+                self._stage_price_selection()
+                status = _status_name(self.m.Status)
             results = self._extract_results(status)
             results.meta["validation"] = self.validate_solution()
             return results
 
         raise NoPricingSolution(self.m.Status)
+
+    def _stage_price_selection(self) -> None:
+        """Stages 2-3 of the lexicographic solve (feedback 1.4).
+
+        The welfare-optimal dispatch of stage 1 is kept: every complementarity binary is fixed at its
+        stage-1 value, so the members' active sets (hence their schedules) cannot change and what is
+        left is an LP in the prices and multipliers. Among the prices that support this dispatch,
+        choose the ones closest to the meter's marginal-cost band [p_t - (1-beta) tau_exp,
+        p_t + (1-beta) tau_imp]: first the largest hourly deviation u (stage 2), then, with u fixed,
+        the sum of the hourly deviations (stage 3), so that every hour, not only the worst, is pinned.
+        """
+        m, T, com = self.m, self.T, self.com
+        f = 1.0 - com.contract.tariff_discount_ratio
+        p = np.asarray(com.energy_price, dtype=float)
+        r_hi = p + f * com.import_tariff          # marginal cost of one more imported kWh
+        r_lo = p - f * com.export_tariff          # marginal value of one more exported kWh
+
+        self.stage1 = {"objective": m.ObjVal, "bound": m.ObjBound, "gap": m.MIPGap, "runtime": m.Runtime}
+        for v in m.getVars():
+            if v.VType == GRB.BINARY:
+                v.LB = v.UB = round(v.X)
+        m.addConstr(m.getObjective() <= m.ObjVal + self.lex_tol, name="lex_stage1_objective")
+
+        prices = self.var["x_price"]
+        keys = list(prices.keys()) if self.allow_price_discrimination else [(self.ids[0], t) for t in T]
+        dev = m.addVars(keys, lb=0.0, name="price_dev")
+        u = m.addVar(lb=0.0, name="price_dev_max")
+        self.var["price_dev"], self.var["price_dev_max"] = dev, u
+        for (i, t) in keys:
+            m.addConstr(dev[i, t] >= prices[i, t] - r_hi[t], name=f"lex_dev_up_{i}_{t}")
+            m.addConstr(dev[i, t] >= r_lo[t] - prices[i, t], name=f"lex_dev_dn_{i}_{t}")
+            m.addConstr(u >= dev[i, t], name=f"lex_dev_max_{i}_{t}")
+
+        m.setObjective(u, GRB.MINIMIZE)                       # stage 2: largest deviation
+        m.optimize()
+        if m.SolCount == 0:
+            raise NoPricingSolution(m.Status)
+        t2 = m.Runtime
+        m.addConstr(u <= u.X + self.lex_tol, name="lex_stage2_max")
+        m.setObjective(dev.sum(), GRB.MINIMIZE)               # stage 3: sum, with the largest fixed
+        m.optimize()
+        if m.SolCount == 0:
+            raise NoPricingSolution(m.Status)
+        self.stage2 = {"max_deviation": u.X, "sum_deviation": dev.sum().getValue(), "runtime": t2 + m.Runtime}
+
 
     # ------------------------------------------------------------------ validation
     def validate_solution(self, tolerance: float | None = None) -> dict[str, float]:
@@ -692,9 +755,14 @@ class DynamicPricingModel:
             hourly=hourly,
             duals={},
             meta={"setup": "DP", "mode": self.mode, "objective_terms": meta_obj,
-                  "solver_objective": self.m.ObjVal,
-                  "solver_bound": self.m.ObjBound,
-                  "solver_gap": self.m.MIPGap, "runtime": self.m.Runtime,
+                  "solver_objective": self.stage1.get("objective", self.m.ObjVal),
+                  "solver_bound": self.stage1.get("bound", self.m.ObjBound),
+                  "solver_gap": self.stage1.get("gap", self.m.MIPGap),
+                  "runtime": self.stage1.get("runtime", self.m.Runtime),
+                  "price_rule": self.price_rule,
+                  "stage2_runtime": self.stage2.get("runtime", 0.0),
+                  "max_price_deviation": self.stage2.get("max_deviation", float("nan")),
+                  "sum_price_deviation": self.stage2.get("sum_deviation", float("nan")),
                   "end_soc_mode": self.end_soc_mode,
                   "price_bounds": self.price_bounds,
                   "exact_exceedance": self.exact_exceedance,
