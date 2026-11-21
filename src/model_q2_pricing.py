@@ -16,7 +16,7 @@ bilevel problem is rewritten as a single-level MPEC:
 4. Requirements (the mandatory Q2 decomposition and the infeasibility extensions):
    - ``cap_only``  : no requirement, community welfare only;
    - ``BB``        : budget balance, payments collected == the manager's DSO cost;
-   - ``BB_IR``     : BB + individual rationality (no member worse off than model R);
+   - ``BB_IR``     : BB + individual rationality (no member worse off than its outside option: the better of R and I);;
    - ``soft_ir``   : BB + IR as a soft constraint, member i pays at most
                      ``benchmark_i + s_i`` with a penalty ``w * sum_i s_i``; always feasible,
                      reports the minimum compensation and the blocking members;
@@ -62,8 +62,8 @@ class DynamicPricingModel:
     mode : {'cap_only', 'BB', 'BB_IR', 'soft_ir', 'extended'}
         Which requirements are imposed (see the module docstring).
     benchmark_costs : dict[str, float] | None
-        Member cost under the outside option (model R, or model I), DKK.  Required by every mode
-        that imposes (hard or soft) individual rationality.
+        Member cost under its outside option, DKK: the better of R and I per member (``main._ir_benchmarks``).
+        Required by every mode that imposes (hard or soft) individual rationality.
     allow_price_discrimination : bool
         If True the manager posts one price per member and hour (x_{i,t}) instead of x_t.
     end_soc_mode : {'constraint', 'objective', 'free'}
