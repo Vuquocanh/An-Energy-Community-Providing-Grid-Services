@@ -66,6 +66,18 @@ def _print_checks(name: str, res) -> None:
     print(f"  [validation] {name}: {txt}")
 
 
+def _ir_benchmarks(res_R, res_I, member_ids) -> dict[str, float]:
+    """Outside option of each member for individual rationality: the better (cheaper) of standing alone
+    without a contract (R) and alone with an individual contract (I). A member that passes IR against
+    this benchmark is better off in the community than under any stand-alone option."""
+    R = res_R.member_costs["total"].to_dict()
+    I = res_I.member_costs["total"].to_dict()
+    bench = {i: min(R[i], I[i]) for i in member_ids}
+    n_I = sum(I[i] < R[i] - 1e-9 for i in member_ids)
+    print(f"  IR benchmark = min(R, I) per member: I is the better outside option for {n_I}/{len(member_ids)} members")
+    return bench
+
+
 def _build_and_solve(com, mode: str, benchmarks: dict[str, float] | None,
                      time_limit: float, warm_from=None, mip_focus: int = 0,
                      big_m: float = 25.0, mip_gap: float = 1e-3):
@@ -112,6 +124,7 @@ def run_q2_3step_decomposition(community_name: str = "base", day: str = "d1",
     res_I = CommunityModel(com, setup="I").build().solve()
     benchmarks_R = res_R.member_costs["total"].to_dict()
     benchmarks_I = res_I.member_costs["total"].to_dict()
+    benchmarks = _ir_benchmarks(res_R, res_I, com.member_ids)
     print(f"  C = {res_C.objective:.4f} DKK | R = {res_R.objective:.4f} DKK | I = {res_I.objective:.4f} DKK")
     res_C.save(res_dir, tag=f"benchmark_C_{day}")
     res_R.save(res_dir, tag=f"benchmark_R_{day}")
@@ -132,7 +145,7 @@ def run_q2_3step_decomposition(community_name: str = "base", day: str = "d1",
 
     # 4. Step 2: + budget balance
     print("\n[Step 2] Model M^P_BB (budget balance)...")
-    m_bb, res_bb = _build_and_solve(com, "BB", benchmarks_R, time_limit, big_m=big_m, mip_gap=mip_gap)
+    m_bb, res_bb = _build_and_solve(com, "BB", benchmarks, time_limit, big_m=big_m, mip_gap=mip_gap)
     if res_bb is None:
         raise RuntimeError("Model BB found no feasible solution: check the log.")
     res_bb.save(res_dir, tag=f"step2_BB_{day}")
@@ -145,7 +158,7 @@ def run_q2_3step_decomposition(community_name: str = "base", day: str = "d1",
 
     # 5. Step 3: + individual rationality (hard), then the soft relaxation
     print("\n[Step 3] Model M^P_BB+IR (budget balance + individual rationality)...")
-    m_ir, res_ir = _build_and_solve(com, "BB_IR", benchmarks_R, time_limit,
+    m_ir, res_ir = _build_and_solve(com, "BB_IR", benchmarks, time_limit,
                                     warm_from=m_bb, mip_focus=1, big_m=big_m, mip_gap=mip_gap)
     if res_ir is not None:
         res_ir.save(res_dir, tag=f"step3_BB_IR_{day}")
@@ -156,7 +169,7 @@ def run_q2_3step_decomposition(community_name: str = "base", day: str = "d1",
         print("  -> BB+IR did not produce a solution under uniform prices.")
 
     print("\n[Step 3b] Model M^P_soft (BB + soft IR: minimum compensation for the blocking members)...")
-    m_soft, res_soft = _build_and_solve(com, "soft_ir", benchmarks_R, time_limit,
+    m_soft, res_soft = _build_and_solve(com, "soft_ir", benchmarks, time_limit,
                                         warm_from=m_bb, mip_focus=1, big_m=big_m, mip_gap=mip_gap)
     if res_soft is not None:
         res_soft.save(res_dir, tag=f"step3b_soft_ir_{day}")
@@ -203,11 +216,11 @@ def run_q2_3step_decomposition(community_name: str = "base", day: str = "d1",
     plot_q2_posted_prices(res_cap, com, results_MC=res_C, save_to=res_dir / f"q2_fig1_posted_prices_{day}.png")
     plot_q2_3step_decomposition(df_summary.reset_index(), save_to=res_dir / f"q2_fig2_3step_decomposition_{day}.png")
     plot_q2_member_gains_and_blocking(
-        res_bb.member_costs, title_suffix=f"Model BB ({day})", benchmark_costs=benchmarks_R,
+        res_bb.member_costs, title_suffix=f"Model BB ({day})", benchmark_costs=benchmarks,
         save_to=res_dir / f"q2_fig3_member_gains_{day}.png")
     if res_soft is not None:
         plot_q2_member_gains_and_blocking(
-            res_soft.member_costs, title_suffix=f"Model soft-IR ({day})", benchmark_costs=benchmarks_R,
+            res_soft.member_costs, title_suffix=f"Model soft-IR ({day})", benchmark_costs=benchmarks,
             save_to=res_dir / f"q2_fig3b_member_gains_soft_ir_{day}.png")
     posted_x = res_cap.hourly["posted_price"].to_numpy()
     df_indiff = analyze_indifference_risk(com, posted_x)
@@ -251,10 +264,12 @@ def run_q2_sensitivity_sweep(community_name: str = "base", day: str = "d1",
 
         res_C = CommunityModel(com_mod, setup="C").build().solve()
         res_R = CommunityModel(com_mod, setup="R").build().solve()
-        benchmarks_R = res_R.member_costs["total"].to_dict()
+        res_I = CommunityModel(com_mod, setup="I").build().solve()
+        benchmarks = _ir_benchmarks(res_R, res_I, com_mod.member_ids)
+        # benchmarks_R = res_R.member_costs["total"].to_dict()
 
         m_cap, res_cap = _build_and_solve(com_mod, "cap_only", None, bb_limit, big_m=big_m, mip_gap=mip_gap)
-        m_bb, res_bb = _build_and_solve(com_mod, "BB", benchmarks_R, bb_limit, big_m=big_m, mip_gap=mip_gap)
+        m_bb, res_bb = _build_and_solve(com_mod, "BB", benchmarks, bb_limit, big_m=big_m, mip_gap=mip_gap)
         if res_cap is None or res_bb is None:
             print("  -> cap_only / BB found no solution at this cap: skipping the factor.")
             m_cap.m.dispose()
@@ -262,11 +277,11 @@ def run_q2_sensitivity_sweep(community_name: str = "base", day: str = "d1",
             continue
 
         status_ir, cost_ir, slack_ir, n_block = "not solved", float("nan"), float("nan"), 0
-        m_ir, res_ir = _build_and_solve(com_mod, "BB_IR", benchmarks_R, time_limit,
+        m_ir, res_ir = _build_and_solve(com_mod, "BB_IR", benchmarks, time_limit,
                                         warm_from=m_bb, mip_focus=1, big_m=big_m, mip_gap=mip_gap)
         if res_ir is not None:
             status_ir, cost_ir = "feasible", res_ir.objective
-        m_soft, res_soft = _build_and_solve(com_mod, "soft_ir", benchmarks_R, time_limit,
+        m_soft, res_soft = _build_and_solve(com_mod, "soft_ir", benchmarks, time_limit,
                                             warm_from=m_bb, mip_focus=1, big_m=big_m, mip_gap=mip_gap)
         if res_soft is not None:
             slack_ir = float(res_soft.member_costs["ir_slack"].sum())
