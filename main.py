@@ -191,7 +191,7 @@ def run_q2_3step_decomposition(community_name: str = "base", day: str = "d1",
         results_dict["BB_IR"] = res_ir
     if res_soft is not None:
         results_dict["soft_ir"] = res_soft
-    df_summary = summarize_q2_experiments(results_dict, res_C, res_R)
+    df_summary = summarize_q2_experiments(results_dict, res_C, res_R, benchmarks)
     print("\n--- Summary comparison table ---")
     print(df_summary.to_string())
     df_summary.to_csv(res_dir / f"q2_3step_summary_{day}.csv")
@@ -236,7 +236,7 @@ def run_q2_3step_decomposition(community_name: str = "base", day: str = "d1",
 #-------------------q2 Experiments/Sensitivity---------------
 
 def run_q2_sensitivity_sweep(community_name: str = "base", day: str = "d1",
-                             time_limit: float = 60, big_m: float = 25.0,
+                             time_limit: float = 120, big_m: float = 25.0,
                              mip_gap: float = 1e-4) -> None:
     """Contract-cap sensitivity study: cap_t = shipped cap_t * cap_factor.
 
@@ -251,16 +251,22 @@ def run_q2_sensitivity_sweep(community_name: str = "base", day: str = "d1",
     res_dir = RESULTS_DIR / community_name / "q2"
     res_dir.mkdir(parents=True, exist_ok=True)
 
-    cap_factors = [0.6, 0.8, 1.0, 1.2, 1.4]
+    cap_factors = [0.8, 0.9, 1.0, 1.1, 1.2, 1.4, 1.6]
     base_cap = load_community(community_name, day=day).contract.capacity_limit_kW.copy()
     records = []
-    bb_limit = max(time_limit, 120.0)   # cap_only and BB need a full solve: their objective is reported
+    bb_limit = max(time_limit, 180.0)   # cap_only and BB need a full solve: their objective is reported
 
     for factor in cap_factors:
         print(f"\nEvaluating cap factor {factor:.2f} (peak cap {base_cap.max() * factor:.2f} kW)...")
 
         com_mod = deepcopy(load_community(community_name, day=day))
         com_mod.contract.capacity_limit_kW = base_cap * factor
+        # The individual caps are shares of the community cap: scale them with it, otherwise model I
+        # (the IR benchmark) would be evaluated on a different contract from C and the DP.
+        com_mod.contract.individual_capacity_limit_kW = {
+            cid: [v * factor for v in caps]
+            for cid, caps in com_mod.contract.individual_capacity_limit_kW.items()
+        }
 
         res_C = CommunityModel(com_mod, setup="C").build().solve()
         res_R = CommunityModel(com_mod, setup="R").build().solve()
@@ -277,6 +283,7 @@ def run_q2_sensitivity_sweep(community_name: str = "base", day: str = "d1",
             continue
 
         status_ir, cost_ir, slack_ir, n_block = "not solved", float("nan"), float("nan"), 0
+        blockers: dict[str, float] = {}
         m_ir, res_ir = _build_and_solve(com_mod, "BB_IR", benchmarks, time_limit,
                                         warm_from=m_bb, mip_focus=1, big_m=big_m, mip_gap=mip_gap)
         if res_ir is not None:
@@ -286,6 +293,8 @@ def run_q2_sensitivity_sweep(community_name: str = "base", day: str = "d1",
         if res_soft is not None:
             slack_ir = float(res_soft.member_costs["ir_slack"].sum())
             n_block = int((res_soft.member_costs["ir_slack"] > 1e-4).sum())
+            blockers = {cid: round(float(v), 4) for cid, v in res_soft.member_costs["ir_slack"].items()
+                        if v > 1e-4}
             if status_ir != "feasible":
                 status_ir = "soft only"
                 cost_ir = res_soft.objective
@@ -307,6 +316,10 @@ def run_q2_sensitivity_sweep(community_name: str = "base", day: str = "d1",
                 "is_BB_IR_feasible": status_ir == "feasible",
                 "total_ir_slack_DKK": round(slack_ir, 4),
                 "num_blocking_members": n_block,
+                "blocking_members": ";".join(f"{cid}:{v}" for cid, v in blockers.items()),
+                "posted_price_h19_DKK_per_kWh": round(float(res_bb.hourly["posted_price"].iloc[19]), 3),
+                "max_price_deviation_DKK_per_kWh": round(
+                    float(res_bb.meta.get("max_price_deviation", float("nan"))), 4),
                 "efficiency_cost_BB_DKK": round(res_bb.objective - res_cap.objective, 2),
                 "efficiency_cost_IR_DKK": round(cost_ir - res_bb.objective, 2) if cost_ir == cost_ir else float("nan"),
             }
@@ -338,7 +351,7 @@ def main() -> None:
     ap.add_argument("--q2", action="store_true", help="run Question 2 dynamic pricing models & generate figures")
     ap.add_argument("--q2-sweep", action="store_true", help="run Question 2 contract-cap sensitivity sweep & generate figure")
     ap.add_argument("--q2-time-limit", type=float, default=420, help="time limit (s) of each BB+IR / soft-IR MILP")
-    ap.add_argument("--sweep-time-limit", type=float, default=60, help="time limit (s) of each MILP in the sweep")
+    ap.add_argument("--sweep-time-limit", type=float, default=120, help="time limit (s) of each MILP in the sweep")
     ap.add_argument("--big-m", type=float, default=25.0,
                     help="Big-M of the KKT complementarities (DKK/kWh); it must exceed every dual variable")
     ap.add_argument("--mip-gap", type=float, default=1e-4, help="relative MIP gap of the pricing models")
