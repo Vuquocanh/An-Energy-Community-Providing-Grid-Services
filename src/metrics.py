@@ -126,17 +126,27 @@ def analyze_price_signals(results_pricing: Results, com_data: Any) -> pd.DataFra
 
 
 def summarize_q2_experiments(
-    results_dict: dict[str, Results], results_C: Results, results_R: Results
+    results_dict: dict[str, Results], results_C: Results, results_R: Results,
+    benchmarks: dict[str, float] | None = None,
 ) -> pd.DataFrame:
-    """One row per pricing variant: welfare, manager budget, IR, flexibility and requirement cost."""
+    """One row per pricing variant: welfare, manager budget, IR, flexibility and requirement cost.
+
+    ``benchmarks`` is the member-level outside option used by the IR requirement (the better of R
+    and I in ``main._ir_benchmarks``).  When it is omitted the summary falls back to model R, which
+    is only the correct IR benchmark if I is never cheaper.
+    """
     records = []
     reference = next(iter(results_dict.values()), None)
 
     for name, res in results_dict.items():
         welfare_rec = calc_welfare_recovery_ratio(res.objective, results_C.objective, results_R.objective)
         bb_summary = calc_budget_balance_summary(res)
-        gains = calc_individual_gains(res, results_R)
-        ir_violations = int((~gains["is_individually_rational"]).sum())
+        if benchmarks is None:
+            gains = calc_individual_gains(res, results_R)
+            ir_violations = int((~gains["is_individually_rational"]).sum())
+        else:
+            costs = res.member_costs["total_cost"]
+            ir_violations = int(sum(costs[i] - benchmarks[i] > 1e-4 for i in costs.index))
         terms = res.meta.get("objective_terms", {})
 
         records.append(
