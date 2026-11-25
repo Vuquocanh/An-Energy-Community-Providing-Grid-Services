@@ -107,8 +107,9 @@ class DynamicPricingModel:
         big_m: float = 25.0,
         price_bounds: tuple[float, float] | None = None,
         exact_exceedance: bool = False,
-        price_rule: Literal["none", "minmax"] = "minmax",
+        price_rule: Literal["none", "minmax", "robust"] = "minmax",
         lex_tol: float = 1e-4,
+        robust_margin: float = 0.10,
         ir_penalty: float = 1e3,
         mip_gap: float = 1e-3,
         time_limit: float = 300,
@@ -131,10 +132,11 @@ class DynamicPricingModel:
         self.exact_exceedance = bool(exact_exceedance)
         self.price_rule = price_rule
         self.lex_tol = float(lex_tol)
+        self.robust_margin = float(robust_margin)
         self.stage1: dict[str, float] = {}
         self.stage2: dict[str, float] = {}
-        if price_rule not in ("none", "minmax"):
-            raise ValueError("price_rule must be 'none' or 'minmax'")
+        if price_rule not in ("none", "minmax", "robust"):
+            raise ValueError("price_rule must be 'none', 'minmax' or 'robust'")
         self.ir_penalty = float(ir_penalty)
 
         if not np.isfinite(self.big_m) or self.big_m <= 0:
@@ -160,6 +162,7 @@ class DynamicPricingModel:
         if mip_focus:
             self.m.Params.MIPFocus = mip_focus
         self.complementarity_pairs = []
+        self.complementarity_info = []
         self.end_soc_value = {}
 
         # Model containers
@@ -204,6 +207,7 @@ class DynamicPricingModel:
         m.addConstr(multiplier <= M * z, name=f"bigM_first_{name}")
         m.addConstr(slack <= M * (1 - z), name=f"bigM_second_{name}")
         self.complementarity_pairs.append((multiplier, slack))
+        self.complementarity_info.append((multiplier, slack, z, name))
 
     def _add_upper_level_variables(self) -> None:
         """Add posted prices x_t (or x_{i,t}) and optional transfer/slack variables."""
@@ -517,7 +521,7 @@ class DynamicPricingModel:
         ):
             if self.m.Status == GRB.TIME_LIMIT:
                 print("  [WARNING] Optimization hit TIME_LIMIT, using the best feasible solution found.")
-            if self.price_rule == "minmax":
+            if self.price_rule in ("minmax", "robust"):
                 self._stage_price_selection()
                 status = _status_name(self.m.Status)
             results = self._extract_results(status)
@@ -527,14 +531,17 @@ class DynamicPricingModel:
         raise NoPricingSolution(self.m.Status)
 
     def _stage_price_selection(self) -> None:
-        """Stages 2-3 of the lexicographic solve (feedback 1.4).
+        """Stages 2-3 of the lexicographic solve (feedback 1.4 / 1.5).
 
-        The welfare-optimal dispatch of stage 1 is kept: every complementarity binary is fixed at its
-        stage-1 value, so the members' active sets (hence their schedules) cannot change and what is
-        left is an LP in the prices and multipliers. Among the prices that support this dispatch,
-        choose the ones closest to the meter's marginal-cost band [p_t - (1-beta) tau_exp,
-        p_t + (1-beta) tau_imp]: first the largest hourly deviation u (stage 2), then, with u fixed,
-        the sum of the hourly deviations (stage 3), so that every hour, not only the worst, is pinned.
+        The welfare-optimal dispatch of stage 1 is kept: every complementarity binary is fixed at its stage-1 value,
+        so the members' active sets cannot change and what is left is an LP in the prices and multipliers.
+        'minmax': among the prices that support this dispatch, the ones closest to the meter's marginal-cost band
+        [p_t - (1-beta) tau_exp, p_t + (1-beta) tau_imp]: largest hourly deviation first, then their sum.
+        'robust': first push the prices OFF the members' indifference thresholds: every active constraint gets a
+        multiplier margin m_j, every variable at zero a reduced-cost margin m_j, 0 <= m_j <= robust_margin, and the
+        sum of the margins is maximised (strict complementarity => the member's response is unique, so the
+        optimistic and pessimistic readings coincide where a margin is achieved); then, with the margins held,
+        the band deviation is minimised as in 'minmax'.
         """
         m, T, com = self.m, self.T, self.com
         f = 1.0 - com.contract.tariff_discount_ratio
@@ -543,10 +550,38 @@ class DynamicPricingModel:
         r_lo = p - f * com.export_tariff          # marginal value of one more exported kWh
 
         self.stage1 = {"objective": m.ObjVal, "bound": m.ObjBound, "gap": m.MIPGap, "runtime": m.Runtime}
+        z_values = {}
         for v in m.getVars():
             if v.VType == GRB.BINARY:
-                v.LB = v.UB = round(v.X)
+                z_values[v.VarName] = round(v.X)
+                v.LB = v.UB = z_values[v.VarName]
         m.addConstr(m.getObjective() <= m.ObjVal + self.lex_tol, name="lex_stage1_objective")
+        t_start = m.Runtime
+
+        if self.price_rule == "robust":
+            # the dual-side quantity of every pair: the multiplier of an active constraint (z = 1), or the reduced
+            # cost of a variable at zero (stationarity pairs, z = 0)
+            margins = []
+            for a, slack, z, name in self.complementarity_info:
+                zv = z_values[z.VarName]
+                if name.startswith("stat_") and zv == 0:
+                    dual_side = slack
+                elif (not name.startswith("stat_")) and zv == 1:
+                    dual_side = a
+                else:
+                    continue
+                mj = m.addVar(lb=0.0, ub=self.robust_margin, name=f"margin_{name}")
+                m.addConstr(dual_side >= mj, name=f"robust_{name}")
+                margins.append(mj)
+            m.setObjective(gp.quicksum(margins), GRB.MAXIMIZE)
+            m.optimize()
+            if m.SolCount == 0:
+                raise NoPricingSolution(m.Status)
+            achieved = m.ObjVal
+            n_full = sum(1 for mj in margins if mj.X >= self.robust_margin - 1e-7)
+            m.addConstr(gp.quicksum(margins) >= achieved - self.lex_tol, name="lex_stage_robust")
+            self.stage2 = {"n_margin_pairs": len(margins), "margin_sum": achieved, "n_full_margin": n_full,
+                           "margin_mean": achieved / max(1, len(margins))}
 
         prices = self.var["x_price"]
         keys = list(prices.keys()) if self.allow_price_discrimination else [(self.ids[0], t) for t in T]
@@ -558,17 +593,16 @@ class DynamicPricingModel:
             m.addConstr(dev[i, t] >= r_lo[t] - prices[i, t], name=f"lex_dev_dn_{i}_{t}")
             m.addConstr(u >= dev[i, t], name=f"lex_dev_max_{i}_{t}")
 
-        m.setObjective(u, GRB.MINIMIZE)                       # stage 2: largest deviation
+        m.setObjective(u, GRB.MINIMIZE)                       # largest deviation from the band
         m.optimize()
         if m.SolCount == 0:
             raise NoPricingSolution(m.Status)
-        t2 = m.Runtime
         m.addConstr(u <= u.X + self.lex_tol, name="lex_stage2_max")
-        m.setObjective(dev.sum(), GRB.MINIMIZE)               # stage 3: sum, with the largest fixed
+        m.setObjective(dev.sum(), GRB.MINIMIZE)               # then their sum
         m.optimize()
         if m.SolCount == 0:
             raise NoPricingSolution(m.Status)
-        self.stage2 = {"max_deviation": u.X, "sum_deviation": dev.sum().getValue(), "runtime": t2 + m.Runtime}
+        self.stage2.update({"max_deviation": u.X, "sum_deviation": dev.sum().getValue(), "runtime": m.Runtime})
 
 
     # ------------------------------------------------------------------ validation
