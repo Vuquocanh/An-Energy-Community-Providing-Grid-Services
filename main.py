@@ -351,6 +351,10 @@ def main() -> None:
     ap.add_argument("--q2", action="store_true", help="run Question 2 dynamic pricing models & generate figures")
     ap.add_argument("--q2-sweep", action="store_true", help="run Question 2 contract-cap sensitivity sweep & generate figure")
     ap.add_argument("--q2-time-limit", type=float, default=420, help="time limit (s) of each BB+IR / soft-IR MILP")
+    ap.add_argument("--q3-base", action="store_true", help="Question 3: DP vs SDP^E / SDP^CC / SDP^CVaR at N = 5 and 10, evaluated on 100 out-of-sample days")
+    ap.add_argument("--q3-eps", action="store_true", help="Question 3: the eps frontier of SDP^CC at N = 10 (joint and hourly)")
+    ap.add_argument("--q3-n", type=int, nargs="+", default=[5, 10], help="in-sample sizes for --q3-base")
+    ap.add_argument("--q3-time-limit", type=float, default=1200, help="time limit (s) of each SDP MILP")
     ap.add_argument("--sweep-time-limit", type=float, default=120, help="time limit (s) of each MILP in the sweep")
     ap.add_argument("--big-m", type=float, default=25.0,
                     help="Big-M of the KKT complementarities (DKK/kWh); it must exceed every dual variable")
@@ -389,6 +393,14 @@ def main() -> None:
         run_q2_sensitivity_sweep(args.community, args.day, time_limit=args.sweep_time_limit,
                                  big_m=args.big_m, mip_gap=args.mip_gap)
 
+    if args.q3_base:
+        from src.q3 import run_q3_base
+        run_q3_base(RESULTS_DIR / args.community / "q3", args.community, args.day, n_values=tuple(args.q3_n),
+                    mip_gap=max(args.mip_gap, 1e-3), time_limit=args.q3_time_limit)
+    if args.q3_eps:
+        from src.q3 import run_q3_eps
+        run_q3_eps(RESULTS_DIR / args.community / "q3", args.community, args.day, mip_gap=max(args.mip_gap, 1e-3), time_limit=args.q3_time_limit)
+        
     if args.demo:
         import runpy
         runpy.run_module("src.scenario_generation", run_name="__main__")
