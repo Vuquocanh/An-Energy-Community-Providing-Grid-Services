@@ -64,11 +64,12 @@ def solve_baseline_dp(com: CommunityData, mode: str = "BB", mip_gap: float = 1e-
 
 def solve_sdp(com: CommunityData, scenarios: list[Scenario], label: str, warm_prices=None, mode: str = "BB",
               cc_eps: float | None = None, cc_joint: bool = True, cvar_beta: float | None = None, cvar_gamma: float = 0.5,
-              mip_gap: float = 1e-3, time_limit: float = 1200, verbose: bool = False) -> dict:
+              mip_gap: float = 1e-3, time_limit: float = 1200, mip_focus: int = 0, verbose: bool = False) -> dict:
     """One SDP variant on one in-sample set; infeasible is a result (status recorded, no prices)."""
     t0 = time.perf_counter()
     m = SDPModel(com, scenarios, mode=mode, cc_eps=cc_eps, cc_joint=cc_joint, cvar_beta=cvar_beta, cvar_gamma=cvar_gamma,
-                 price_bounds=DynamicPricingModel.default_price_bounds(com), mip_gap=mip_gap, time_limit=time_limit, verbose=verbose).build()
+                 price_bounds=DynamicPricingModel.default_price_bounds(com), mip_gap=mip_gap, time_limit=time_limit,
+                 mip_focus=mip_focus, verbose=verbose).build()
     if warm_prices is not None:
         m.warm_start_from_prices(warm_prices)
     row = {"model": label, "N": len(scenarios), "eps": cc_eps if cc_eps is not None else np.nan, "cc_joint": cc_joint if cc_eps is not None else np.nan,
@@ -130,14 +131,20 @@ def run_q3_base(out: Path | str, community: str = "base", day: str = "d1", n_val
     print(f"Q3 base study: {community} {day}, N in {list(n_values)}, {n_oos} out-of-sample days (seed {sets['oos'][0].seed})")
 
     print("[baseline] DP at theta = 1")
-    base = solve_baseline_dp(com, mip_gap=mip_gap)
+    base = solve_baseline_dp(com, mip_gap=1e-4)
     rows, prices, targets, keys = [base["row"]], {"DP": base["prices"]}, {"DP": base["row"]["objective"]}, {"DP": {"model": "DP", "N": 1}}
-    variants = [("SDP_E", {}), (f"SDP_CC", {"cc_eps": eps, "cc_joint": True}), ("SDP_CVaR", {"cvar_beta": cvar_beta, "cvar_gamma": cvar_gamma})]
+    variants = [("SDP_CVaR", {"cvar_beta": cvar_beta, "cvar_gamma": cvar_gamma}), ("SDP_E", {}),
+            ("SDP_CC", {"cc_eps": eps, "cc_joint": True, "mip_focus": 1})]
     for N in n_values:
         scen = sets[f"in_{N}"]
+        warm = {"default": base["prices"]}
         for name, kw in variants:
             label = f"{name}_N{N}"
-            res = solve_sdp(com, scen, name, warm_prices=base["prices"], mip_gap=mip_gap, time_limit=time_limit, **kw)
+            # start = warm.get("SDP_CVaR", warm["default"]) if name == "SDP_CC" else warm["default"]
+            start = warm.get("SDP_CVaR", warm["default"])
+            res = solve_sdp(com, scen, name, warm_prices=start, mip_gap=mip_gap, time_limit=time_limit, **kw)
+            if res["prices"] is not None:
+                warm[name] = res["prices"]
             rows.append(res["row"]); prices[label] = res["prices"]; targets[label] = res["row"].get("objective", np.nan)
             keys[label] = {"model": name, "N": N, **{k: res["row"][k] for k in ("eps", "cc_joint", "cvar_beta", "cvar_gamma")}}
             if res["scenarios"] is not None:
@@ -163,14 +170,17 @@ def run_q3_eps(out: Path | str, community: str = "base", day: str = "d1", N: int
     sets = scenario_sets(com, n_in=(N,), n_oos=n_oos)
     scen = sets[f"in_{N}"]
     print(f"Q3 eps study: N = {N}, eps in {list(eps_values)}, joint{' and hourly' if both_variants else ''}")
-    base = solve_baseline_dp(com, mip_gap=mip_gap)
+    base = solve_baseline_dp(com, mip_gap=1e-4)
     rows, prices, targets, keys = [base["row"]], {"DP": base["prices"]}, {"DP": base["row"]["objective"]}, {"DP": {"model": "DP", "N": 1}}
     for joint in ((True, False) if both_variants else (True,)):
+        start = base["prices"]
         for e in eps_values:
             tag = "joint" if joint else "hourly"
             label = f"SDP_CC_{tag}_eps{e:g}_N{N}"
-            res = solve_sdp(com, scen, f"SDP_CC_{tag}", warm_prices=base["prices"], cc_eps=e, cc_joint=joint, mip_gap=mip_gap, time_limit=time_limit)
-            rows.append({**res["row"], "model": label}); prices[label] = res["prices"]; targets[label] = res["row"].get("objective", np.nan)
+            res = solve_sdp(com, scen, f"SDP_CC_{tag}", warm_prices=start, cc_eps=e, cc_joint=joint, mip_gap=mip_gap,
+                            time_limit=time_limit, mip_focus=1)
+            if res["prices"] is not None:
+                start = res["prices"]
             keys[label] = {"model": f"SDP_CC_{tag}", "N": N, "eps": e, "cc_joint": joint}
     models = pd.DataFrame(rows)
     models.to_csv(out / "q3_eps_models.csv", index=False)

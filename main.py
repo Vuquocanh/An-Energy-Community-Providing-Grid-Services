@@ -355,6 +355,7 @@ def main() -> None:
     ap.add_argument("--q3-eps", action="store_true", help="Question 3: the eps frontier of SDP^CC at N = 10 (joint and hourly)")
     ap.add_argument("--q3-n", type=int, nargs="+", default=[5, 10], help="in-sample sizes for --q3-base")
     ap.add_argument("--q3-time-limit", type=float, default=1200, help="time limit (s) of each SDP MILP")
+    ap.add_argument("--q3-figures", action="store_true", help="Question 3: figures from the CSVs of --q3-base / --q3-eps")
     ap.add_argument("--sweep-time-limit", type=float, default=120, help="time limit (s) of each MILP in the sweep")
     ap.add_argument("--big-m", type=float, default=25.0,
                     help="Big-M of the KKT complementarities (DKK/kWh); it must exceed every dual variable")
@@ -400,6 +401,10 @@ def main() -> None:
     if args.q3_eps:
         from src.q3 import run_q3_eps
         run_q3_eps(RESULTS_DIR / args.community / "q3", args.community, args.day, mip_gap=max(args.mip_gap, 1e-3), time_limit=args.q3_time_limit)
+
+    if args.q3_figures:
+        from src.plotting_q3 import run_q3_figures
+        run_q3_figures(RESULTS_DIR / args.community / "q3", args.community, args.day)
         
     if args.demo:
         import runpy
