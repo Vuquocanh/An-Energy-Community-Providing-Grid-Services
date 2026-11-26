@@ -1,7 +1,7 @@
 """Question 3 experiments: pricing for uncertain members. One command per experiment (README rule).
 
     python main.py --q3-base              # DP baseline vs SDP^E, SDP^CC (eps), SDP^CVaR at N = 5 and 10; out-of-sample on 100 days
-    python main.py --q3-eps               # the eps frontier of SDP^CC at N = 10 (joint and hourly), same 100 days
+    python main.py --q3-eps               # the eps frontier of SDP^CC at N = 5 (joint and hourly), same 100 days
     python main.py --q3-base --q3-n 5     # only N = 5 (quick)
 
 Every price vector is evaluated on the SAME out-of-sample scenarios (common random numbers, seed 47750) with the
@@ -135,9 +135,9 @@ def run_q3_base(out: Path | str, community: str = "base", day: str = "d1", n_val
     rows, prices, targets, keys = [base["row"]], {"DP": base["prices"]}, {"DP": base["row"]["objective"]}, {"DP": {"model": "DP", "N": 1}}
     variants = [("SDP_CVaR", {"cvar_beta": cvar_beta, "cvar_gamma": cvar_gamma}), ("SDP_E", {}),
             ("SDP_CC", {"cc_eps": eps, "cc_joint": True, "mip_focus": 1})]
+    warm = {"default": base["prices"]}          # carried across N: N=10 starts from the N=5 CVaR prices
     for N in n_values:
         scen = sets[f"in_{N}"]
-        warm = {"default": base["prices"]}
         for name, kw in variants:
             label = f"{name}_N{N}"
             # start = warm.get("SDP_CVaR", warm["default"]) if name == "SDP_CC" else warm["default"]
@@ -161,8 +161,8 @@ def run_q3_base(out: Path | str, community: str = "base", day: str = "d1", n_val
     return {"models": models, "summary": summary, "prices": prices}
 
 
-def run_q3_eps(out: Path | str, community: str = "base", day: str = "d1", N: int = 10,
-               eps_values: tuple[float, ...] = (0.0, 0.1, 0.2, 0.3, 0.5), both_variants: bool = True,
+def run_q3_eps(out: Path | str, community: str = "base", day: str = "d1", N: int = 5,
+               eps_values: tuple[float, ...] = (0.0, 0.2, 0.4, 0.6), both_variants: bool = True,
                mip_gap: float = 1e-3, time_limit: float = 1200, n_oos: int = 100) -> dict:
     """The eps frontier of SDP^CC: in-sample cost and realised violation against the target, joint and hourly."""
     out = Path(out); out.mkdir(parents=True, exist_ok=True)
@@ -172,8 +172,16 @@ def run_q3_eps(out: Path | str, community: str = "base", day: str = "d1", N: int
     print(f"Q3 eps study: N = {N}, eps in {list(eps_values)}, joint{' and hourly' if both_variants else ''}")
     base = solve_baseline_dp(com, mip_gap=1e-4)
     rows, prices, targets, keys = [base["row"]], {"DP": base["prices"]}, {"DP": base["row"]["objective"]}, {"DP": {"model": "DP", "N": 1}}
+    # warm start: the SDP^CVaR prices of the base study at this N when available (CC finds no incumbent from DP prices), else DP
+    warm0 = base["prices"]
+    base_prices = out / "q3_base_prices.json"
+    if base_prices.exists():
+        saved = json.load(open(base_prices)).get(f"SDP_CVaR_N{N}")
+        if saved is not None:
+            warm0 = np.asarray(saved)
+            print(f"  warm start from q3_base_prices.json: SDP_CVaR_N{N}")
     for joint in ((True, False) if both_variants else (True,)):
-        start = base["prices"]
+        start = warm0
         for e in eps_values:
             tag = "joint" if joint else "hourly"
             label = f"SDP_CC_{tag}_eps{e:g}_N{N}"
@@ -181,7 +189,10 @@ def run_q3_eps(out: Path | str, community: str = "base", day: str = "d1", N: int
                             time_limit=time_limit, mip_focus=1)
             if res["prices"] is not None:
                 start = res["prices"]
+            rows.append(res["row"]); prices[label] = res["prices"]; targets[label] = res["row"].get("objective", np.nan)
             keys[label] = {"model": f"SDP_CC_{tag}", "N": N, "eps": e, "cc_joint": joint}
+            if res["scenarios"] is not None:
+                res["scenarios"].to_csv(out / f"q3_eps_insample_{label}.csv", index=False)
     models = pd.DataFrame(rows)
     models.to_csv(out / "q3_eps_models.csv", index=False)
     json.dump({k: (v.tolist() if v is not None else None) for k, v in prices.items()}, open(out / "q3_eps_prices.json", "w"), indent=1)

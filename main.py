@@ -352,8 +352,8 @@ def main() -> None:
     ap.add_argument("--q2-sweep", action="store_true", help="run Question 2 contract-cap sensitivity sweep & generate figure")
     ap.add_argument("--q2-time-limit", type=float, default=420, help="time limit (s) of each BB+IR / soft-IR MILP")
     ap.add_argument("--q3-base", action="store_true", help="Question 3: DP vs SDP^E / SDP^CC / SDP^CVaR at N = 5 and 10, evaluated on 100 out-of-sample days")
-    ap.add_argument("--q3-eps", action="store_true", help="Question 3: the eps frontier of SDP^CC at N = 10 (joint and hourly)")
-    ap.add_argument("--q3-n", type=int, nargs="+", default=[5, 10], help="in-sample sizes for --q3-base")
+    ap.add_argument("--q3-eps", action="store_true", help="Question 3: the eps frontier of SDP^CC at N = --q3-n[0] (default 5) (joint and hourly)")
+    ap.add_argument("--q3-n", type=int, nargs="+", default=[5, 10], help="in-sample sizes for --q3-base (first value is the N of --q3-eps)")
     ap.add_argument("--q3-time-limit", type=float, default=1200, help="time limit (s) of each SDP MILP")
     ap.add_argument("--q3-figures", action="store_true", help="Question 3: figures from the CSVs of --q3-base / --q3-eps")
     ap.add_argument("--sweep-time-limit", type=float, default=120, help="time limit (s) of each MILP in the sweep")
@@ -400,7 +400,8 @@ def main() -> None:
                     mip_gap=max(args.mip_gap, 1e-3), time_limit=args.q3_time_limit)
     if args.q3_eps:
         from src.q3 import run_q3_eps
-        run_q3_eps(RESULTS_DIR / args.community / "q3", args.community, args.day, mip_gap=max(args.mip_gap, 1e-3), time_limit=args.q3_time_limit)
+        run_q3_eps(RESULTS_DIR / args.community / "q3", args.community, args.day, N=args.q3_n[0],
+                   mip_gap=max(args.mip_gap, 1e-3), time_limit=args.q3_time_limit)
 
     if args.q3_figures:
         from src.plotting_q3 import run_q3_figures
