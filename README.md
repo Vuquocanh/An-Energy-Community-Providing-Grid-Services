@@ -41,8 +41,9 @@ conda activate 46750-a2
 ### 1.2 Gurobi licence
 
 The code uses [Gurobi](https://www.gurobi.com) through the `gurobipy` package. **The restricted licence
-shipped with the package (2000 variables/constraints) is not large enough for Questions 2 and 3** - sixteen
-members' KKT systems with binaries, replicated per scenario. Request the
+shipped with the package (2000 variables/constraints) is not large enough for any question**: R and I of Question 1
+already have about 2,300-2,700 variables and as many constraints, and Questions 2-3 add sixteen members' KKT systems
+with binaries, replicated per scenario. Request the
 free [academic licence](https://www.gurobi.com/academia/academic-program-and-licenses/) with your DTU
 e-mail and activate it with `grbgetkey <your-key>` (on the DTU network or VPN) before you start. Every member's
 problem is a linear program, so the single-level reformulations of Questions 2-3 are mixed-integer linear programs (KKT
@@ -307,13 +308,19 @@ so that every variant is reproducible from a name and a value, and run your mode
 configurations with outputs saved under `results/`. If you add appliances, communities or scenarios, follow the same
 file structures and document them here (file, fields, units, seeds).
 
-## 5. What is expected of your code
+## 5. Reproducing the report
 
-As in Assignment 1: keep data loading, model building, solving and plotting separate; document every function you add
-(a short docstring with inputs, outputs and units); make each experiment of the report runnable with a single command
-and save its outputs under `results/`; fix and report the seeds of every scenario set; and commit regularly with
-meaningful messages - the git history is also a record of everyone's contribution. The graders should be able to open
-the code, follow this README, and reproduce every number and figure of the report.
+Every number and figure of the report is produced by one command of Section 7, run from the repository root once
+`python main.py --verify` passes. Each command prints its main tables and writes its tables (CSV) and figures (PNG) to
+its own folder under `results/` (git-ignored). Each Question 1 command runs in a few seconds; the Question 2 MILPs stop
+at their time limits (Section 7.1).
+
+The Question 1 results were produced with Python 3.13 and gurobipy 13.0.1; a rerun with the same versions gives the
+same numbers. With another Gurobi version the costs are the same (and so `value_DKK` and the value of pooling), but
+quantities that depend on the schedule can differ where the optimum is not unique: the hourly imports (R has
+alternative optima with the same cost, Section 6.4), hence the DSO metrics and the energy shifted, and the internal
+price lambda_t in the hours at the cap, hence each member's payment in the settlement of C (the manager's total
+surplus is unique, Section 7).
 
 ## 6. Models (`src/model.py`)
 
@@ -353,6 +360,8 @@ Per member i and hour t, in kWh/h (= kW at the hourly resolution):
 | `soc_end` | s_24 >= s_0 (`end_soc_mode="constraint"`, the default) | constraint | battery owners |
 
 Cost of the member: c_L sum_t dev_t + c_PV sum_t pv_t. Net consumption q_t = l_t + p_ch_t - pv_t - p_dis_t.
+
+**End of day** (`end_soc_mode`, as in Assignment 1): `"constraint"` (the default, used in Question 1) adds `soc_end`, s_24 >= s_0; `"objective"` drops it and credits the energy left at t = 24 at `final_soc_price` (default p_23 + tau_imp), reported as the cost term `end_soc_value`; `"free"` imposes neither.
 
 ### 6.2 The meters
 
