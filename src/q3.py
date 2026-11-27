@@ -82,14 +82,15 @@ def solve_sdp(com: CommunityData, scenarios: list[Scenario], label: str, warm_pr
                     "expected_penalty": np.nan, "in_sample_violations": np.nan, "solve_s": time.perf_counter() - t0, "gap": np.nan, "max_price_deviation": np.nan})
         print(f"  {label} N={len(scenarios)}: {row['status']} after {row['solve_s']:.0f} s")
         m.m.dispose()
-        return {"row": row, "prices": None, "scenarios": None}
+        return {"row": row, "prices": None, "scenarios": None, "members": None}
     row.update({"status": r.status, "objective": float(r.objective), "expected_penalty": r.meta["expected_penalty"],
                 "in_sample_violations": r.meta["in_sample_violations"], "solve_s": time.perf_counter() - t0, "gap": r.meta["solver_gap"],
-                "max_price_deviation": r.meta["max_price_deviation"], "cvar": r.meta.get("cvar")})
+                "max_price_deviation": r.meta["max_price_deviation"], "cvar": r.meta.get("cvar"),
+                "total_ir_slack": r.meta.get("total_ir_slack", 0.0)})
     print(f"  {label} N={len(scenarios)}: objective {r.objective:.3f}, violations {r.meta['in_sample_violations']}/{len(scenarios)}, "
           f"gap {r.meta['solver_gap']:.1e}, {row['solve_s']:.0f} s")
     m.m.dispose()
-    return {"row": row, "prices": r.prices, "scenarios": r.scenarios}
+    return {"row": row, "prices": r.prices, "scenarios": r.scenarios, "members": r.members}
 
 
 def evaluate_all(prices: dict[str, np.ndarray], oos: list[Scenario], targets: dict[str, float], out: Path, prefix: str,
@@ -128,13 +129,19 @@ def run_q3_base(out: Path | str, community: str = "base", day: str = "d1", n_val
     sets = scenario_sets(com, n_in=tuple(n_values), n_oos=n_oos)
     for scen in sets.values():
         validate_scenarios(com, scen)
+    from .q3_scenarios import theta_table
+    for key, scen in sets.items():                      # the drawn sets, with their seeds, as the deliverable asks
+        theta_table(scen).to_csv(out / f"q3_scenarios_{key}.csv", index=False)
+    json.dump({key: {"n": len(scen), "seed": scen[0].seed} for key, scen in sets.items()},
+              open(out / "q3_scenarios_seeds.json", "w"), indent=1)
     print(f"Q3 base study: {community} {day}, N in {list(n_values)}, {n_oos} out-of-sample days (seed {sets['oos'][0].seed})")
 
     print("[baseline] DP at theta = 1")
     base = solve_baseline_dp(com, mip_gap=1e-4)
     rows, prices, targets, keys = [base["row"]], {"DP": base["prices"]}, {"DP": base["row"]["objective"]}, {"DP": {"model": "DP", "N": 1}}
     variants = [("SDP_CVaR", {"cvar_beta": cvar_beta, "cvar_gamma": cvar_gamma}), ("SDP_E", {}),
-            ("SDP_CC", {"cc_eps": eps, "cc_joint": True, "mip_focus": 1})]
+                ("SDP_CC", {"cc_eps": eps, "cc_joint": True, "mip_focus": 1}),
+                ("SDP_E_softIR", {"mode": "soft_ir"})]      # IR in expectation with one slack per member (Formative 2, E5b-c)
     warm = {"default": base["prices"]}          # carried across N: N=10 starts from the N=5 CVaR prices
     for N in n_values:
         scen = sets[f"in_{N}"]
@@ -149,6 +156,8 @@ def run_q3_base(out: Path | str, community: str = "base", day: str = "d1", n_val
             keys[label] = {"model": name, "N": N, **{k: res["row"][k] for k in ("eps", "cc_joint", "cvar_beta", "cvar_gamma")}}
             if res["scenarios"] is not None:
                 res["scenarios"].to_csv(out / f"q3_base_insample_{label}.csv", index=False)
+            if res.get("members") is not None:
+                res["members"].to_csv(out / f"q3_base_members_{label}.csv", index=False)
     models = pd.DataFrame(rows)
     models.to_csv(out / "q3_base_models.csv", index=False)
     json.dump({k: (v.tolist() if v is not None else None) for k, v in prices.items()}, open(out / "q3_base_prices.json", "w"), indent=1)

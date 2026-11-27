@@ -73,6 +73,10 @@ src/
   validation.py                Validation checks of Question 1 (python main.py --verify) and of Question 2 (run_q2_validation_pipeline, called by python main.py --q2)
   scenario_generation.py       Question 3: independent preference scenarios per member, merged into joint scenarios (numpy only)
 data/
+  q3_scenarios.py              Question 3: the starter's theta draws turned into full communities (reference profile, bounds and daily minimum recomputed; contract unchanged), the scenario sets with their seeds, validation checks
+  model_q3_sdp.py              Question 3: SDPModel(DynamicPricingModel), the pricing MILP with N scenario copies of the members' KKT systems and one price vector; modes BB / soft_ir; expected cost, chance constraint on the cap (joint or hourly) and CVaR objective; warm start from a price vector
+  q3_evaluate.py               Question 3: evaluation of a price vector on a scenario (members re-solved at fixed prices, meter, DSO bill, payments, budget, IR against min(R, I) of that scenario), with the optimistic / pessimistic readings of the members' best-response sets
+  q3.py, plotting_q3.py        Question 3 experiments (run_q3_base, run_q3_eps) and figures (run_q3_figures)
   appliance_params.json        SHARED catalogue (Assignment 1 format): the loads FL_L1-FL_L4 (linear disutility 0.25-2.0 DKK/kWh), PV_01_S, BAT_01_S
   bus_params.json              SHARED connection point: day-1 prices and the grid tariffs (unchanged from Assignment 1)
   weekly_profiles.json         Seven days d1-d7 of prices, PV availability ratios and reference load factors
@@ -81,7 +85,7 @@ data/
   preference_uncertainty_params.json   Question 3: uncertainty about the members' preference parameters
   community_base_case.png/.svg, setup_R.png/.svg, setup_I.png/.svg   Figures 1-3 of the assignment (reference, individual contracts, community contract; schematic)
   fig_q3_scenarios.png/.svg    Figure 4 of the assignment (how the scenarios of Question 3 are generated)
-results/                       Written by the code (git-ignored): q1_base/, q1_sensitivity/, data/, base/q2/ (Section 7)
+results/                       Written by the code (git-ignored): q1_base/, q1_sensitivity/, data/, base/q2/, base/q3/ (Section 7)
 requirements.txt, environment.yaml, .gitignore
 diagnose_q2_ir.py, verify_q2_repaired.py   Standalone Question 2 diagnostics (when BB+IR is infeasible or the MILP does not finish)
 ```
@@ -404,6 +408,9 @@ A model built on the class that has integer variables gets the same tables, with
 | `python main.py --q1-sensitivity` | Question 1: sweeps of the discount beta and of the cap factor f (cap = f E_R / 24), one at a time, the other at its base value (d1; values in `q1.SWEEPS`) | `results/q1_sensitivity/`: `sweep_beta.csv`, `sweep_cap_factor.csv` (the metrics of R, I and C for every value), `fig_sensitivity.png` (the cap: value and max exceedance), `fig_sensitivity_full.png` (both terms, all three metrics) |
 | `python main.py --q2` (`--day d1`) | Question 2: the mandatory decomposition cap_only -> BB -> BB+IR (-> soft IR, extended), the Q2 validation and the figures (Section 7.1) | `results/base/q2/`: `q2_3step_summary_<day>.csv`, `q2_indifference_analysis_<day>.csv`, `q2_fig1_posted_prices_<day>.png`, `q2_fig2_3step_decomposition_<day>.png`, `q2_fig3_member_gains_<day>.png`, `q2_fig3b_member_gains_soft_ir_<day>.png`, `q2_fig5_indifference_risk_<day>.png`, and per benchmark / step `base_<day>_<step>_hourly.csv`, `_members.csv`, `_member_costs.csv`, `_summary.txt` |
 | `python main.py --q2-sweep` | Question 2: contract-cap sensitivity of the pricing model (`--sweep-time-limit` per MILP) | `results/base/q2/`: `q2_cap_sensitivity_sweep_<day>.csv`, `q2_fig4_cap_sensitivity_<day>.png` |
+| `python main.py --q3-base` (`--q3-n 5 10`, `--q3-time-limit`, `--mip-gap`) | Question 3: DP at theta = 1 against SDP^E, SDP^CC (eps = 0.1, joint), SDP^CVaR (beta 0.9, gamma 0.5) and SDP^E with soft IR in expectation, at every N; every price vector evaluated on the same 100 out-of-sample days in the optimistic and the pessimistic reading | `results/base/q3/`: `q3_base_models.csv` (in-sample objective, violations, size, time, gap), `q3_base_summary.csv` (realised cost, violation frequency, exceedance, budget, IR, VSS per model and reading), `q3_base_prices.json`, `q3_base_oos_<model>_N<N>_<reading>.csv`, `q3_base_insample_<model>_N<N>.csv`, `q3_base_members_<model>_N<N>.csv`, the scenario sets `q3_scenarios_<set>.csv` and `q3_scenarios_seeds.json` |
+| `python main.py --q3-eps` (`--q3-n 5`) | Question 3: the eps frontier of SDP^CC at N = `--q3-n[0]`, eps in {0, 0.2, 0.4, 0.6}, joint and hourly, warm-started from the SDP^CVaR prices of `--q3-base` | `results/base/q3/`: `q3_eps_models.csv`, `q3_eps_summary.csv`, `q3_eps_prices.json`, `q3_eps_oos_<...>.csv` |
+| `python main.py --q3-figures` | Question 3 figures from the CSVs above (runs that closed the MIP gap only) and the knife-edge figure of the DP prices on the expected scenario | `results/base/q3/`: `q3_fig1_models_vs_baseline.png`, `q3_fig2_eps_frontier.png`, `q3_fig3_knife_edge.png`, `q3_knife_edge_hourly.csv` |
 
 **Question 1 metrics** (`q1.metrics`), all against R (the members alone, no contract):
 
@@ -449,3 +456,28 @@ a negative gain against R. `q2_3step_summary_<day>.csv` collects them per step.
 
 Time limits: `--q2-time-limit` (BB+IR and soft-IR, default 420 s) and `--sweep-time-limit` (each MILP of the sweep,
 default 60 s); `--mip-gap` is the relative MIP gap (default 1e-4).
+
+### 7.2 Question 3: pricing under uncertain preferences (`src/model_q3_sdp.py`, `src/q3_evaluate.py`)
+
+The manager posts the 24 prices before the members' preferences are known. `q3_scenarios.scenario_sets` turns the
+starter's draws of the profile exponent theta (uniform on [0.8, 1.2], independent per member, mean 1) into one
+community per scenario (reference profile rho^theta, bounds and daily minimum recomputed, contract unchanged):
+in-sample N = 5 (seed 46755) and N = 10 (46760), out-of-sample 100 (47750); `python -m src.q3_scenarios` runs the
+checks (theta = 1 reproduces the base case, E_min = sum of the reference, theta inside the bounds).
+
+`SDPModel` is `DynamicPricingModel` with one copy of every member's KKT system per scenario (member ids `C1__s3`),
+shared prices, the meter and the DSO cost per scenario, the expected community cost as objective, budget balance and
+(soft) individual rationality in expectation. Variants: `cc_eps` adds the chance constraint on the cap, one binary
+per scenario (`cc_joint=True`, the day) or per scenario and hour; `cvar_beta` / `cvar_gamma` replace the objective by
+(1 - gamma) E + gamma CVaR_beta. `validate_solution` re-solves every scenario's members at the posted prices and checks
+the meter identity, the expectation constraints and the in-sample violation count; with N = 1 and theta = 1 the model
+reproduces `DynamicPricingModel` (same objective and prices).
+
+`q3_evaluate.evaluate_prices` scores a price vector on one scenario without a manager: 16 member LPs at the posted
+prices, meter, DSO bill, payments, budget, IR against min(cost_R, cost_I) of that scenario. Because every
+welfare-optimal price sits on a member's indifference threshold, the best responses are sets, and one price vector
+has several readings: `tie_break="optimistic"` (lowest community cost over the best-response sets, what the pricing
+model assumes), `"pessimistic"` (largest import in the binding hours), `"vertex"` (the solver's). `with_range=True`
+reports the hourly range of the net import. Sizes: 3 336 binaries and about 13 000 constraints per scenario (base
+community); N = 5 solves in minutes at a 0.5 % gap, N = 10 (33 360 binaries) does not close 3 % in an hour, and a
+warm start cannot be carried across N because budget balance in expectation is tied to the scenario set.

@@ -41,7 +41,7 @@ def _label_name(row) -> str:
 
 def plot_q3_models_vs_baseline(summary: pd.DataFrame, oos_dir: Path | str, save_to: Path | str | None = None,
                                title: str = "Pricing for the average member breaks the cap on half the days; "
-                                            "the stochastic models trade a few DKK/day for it") -> plt.Figure:
+                                            "five scenarios bring it to one day in ten, at no cost") -> plt.Figure:
     oos_dir = Path(oos_dir)
     opt = summary[summary["reading"] == "optimistic"].copy()
     opt["order"] = opt["model"].map({"DP": 0, "SDP_E": 1, "SDP_CC": 2, "SDP_CVaR": 3}) + opt["N"].fillna(1) / 100
@@ -151,6 +151,9 @@ def run_q3_figures(out: Path | str, community: str = "base", day: str = "d1") ->
     out = Path(out)
     if (out / "q3_base_summary.csv").exists():
         s = pd.read_csv(out / "q3_base_summary.csv")
+        m = pd.read_csv(out / "q3_base_models.csv")   # only runs that closed the MIP gap (<= 1 %) go in the figure
+        closed = {f"{r.model}_N{int(r.N)}" for r in m.itertuples() if r.model not in ("DP", "SDP_E_softIR") and pd.notna(r.gap) and r.gap <= 1e-2}
+        s = s[(s["label"] == "DP") | s["label"].isin(closed)]
         plot_q3_models_vs_baseline(s, out, save_to=out / "q3_fig1_models_vs_baseline.png")
         print("  wrote q3_fig1_models_vs_baseline.png")
     if (out / "q3_eps_summary.csv").exists():
